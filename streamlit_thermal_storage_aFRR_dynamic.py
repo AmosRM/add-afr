@@ -33,7 +33,10 @@ This application optimizes thermal storage operations to minimize energy costs b
 # Add helpful guidance
 st.info("👈 **Getting Started:** Use the sidebar to configure the optimization mode, data sources, and system parameters, then run the optimization below.")
 
-# --- NEW: CACHED FUNCTION FOR AFRR PRE-COMPUTATION ---
+# Fixed version of the precompute_afrr_auction function
+# This ensures that if ANY 15-minute interval within a 4-hour aFRR block has HLF,
+# the ENTIRE block is considered blocked (all-or-nothing logic)
+
 @st.cache_data
 def precompute_afrr_auction(
     _df_afrr, afrr_bid_strategy, static_bid_price, _df_afrr_bids,
@@ -55,7 +58,6 @@ def precompute_afrr_auction(
         afrr_blocks['our_bid'] = static_bid_price
     else:  # Dynamic Bids
         if _df_afrr_bids is None:
-            # This case should be handled before calling the function, but as a safeguard:
             return None, None
         afrr_blocks = pd.merge(afrr_blocks, _df_afrr_bids, left_index=True, right_index=True, how='left')
         afrr_blocks['Bid Price'] = afrr_blocks['Bid Price'].ffill().bfill()
@@ -70,11 +72,17 @@ def precompute_afrr_auction(
     afrr_blocks["is_hochlast"] = False
 
     if is_15min_data:
+        # For 15-minute data, we need to check each 4-hour block as a unit
+        afrr_blocks['block_id'] = afrr_blocks.index.floor('4H')
+        
+        # First, determine HLF status for each 15-min interval
+        hlf_status = {}
         for idx, row in afrr_blocks.iterrows():
             interval_in_day = (idx.hour * 4) + (idx.minute // 15)
             is_holiday = idx.strftime('%Y-%m-%d') in holiday_set
             is_static_hochlast = interval_in_day in static_hochlast_intervals
             is_dynamic_hochlast = False
+            
             if _df_peak is not None and hlf_time_cols_for_afrr:
                 date_str = idx.strftime('%Y-%m-%d')
                 day_peak_data = _df_peak[_df_peak['date'] == date_str]
@@ -82,10 +90,25 @@ def precompute_afrr_auction(
                     col_name = hlf_time_cols_for_afrr[interval_in_day]
                     if col_name in day_peak_data.columns:
                         is_dynamic_hochlast = bool(day_peak_data[col_name].iloc[0])
-            afrr_blocks.loc[idx, "is_hochlast"] = (is_static_hochlast or is_dynamic_hochlast) and not is_holiday
-
+            
+            hlf_status[idx] = (is_static_hochlast or is_dynamic_hochlast) and not is_holiday
+        
+        # Now check if ANY interval in each 4-hour block has HLF
+        block_has_hlf = {}
+        for block_id in afrr_blocks['block_id'].unique():
+            block_intervals = afrr_blocks[afrr_blocks['block_id'] == block_id].index
+            # If ANY interval in this block has HLF, the entire block has HLF
+            block_has_hlf[block_id] = any(hlf_status.get(idx, False) for idx in block_intervals)
+        
+        # Apply the block-level HLF status to all intervals in each block
+        for idx, row in afrr_blocks.iterrows():
+            afrr_blocks.loc[idx, "is_hochlast"] = block_has_hlf[row['block_id']]
+        
+        # A block is won only if price is met AND the block has no HLF
         afrr_blocks["won"] = afrr_blocks["won_price"] & (~afrr_blocks["is_hochlast"])
-        afrr_blocks['block_id'] = afrr_blocks.index.floor('4H')
+        
+        # Group by block to determine which blocks are actually won
+        # ALL intervals in a block must be "won" for the block to be won
         block_won = afrr_blocks.groupby('block_id')['won'].all()
         block_bid_price = afrr_blocks.groupby('block_id')['our_bid'].first()
         block_revenue = block_won * block_bid_price * bid_mw * 4
@@ -100,9 +123,19 @@ def precompute_afrr_auction(
     else:  # 4-hour blocks
         for idx, row in afrr_blocks.iterrows():
             block_start_hour = idx.hour
-            block_intervals = [( (block_start_hour + h_offset) * 4 + (m_offset // 15) ) for h_offset in range(4) for m_offset in [0, 15, 30, 45]]
+            # Check ALL 15-minute intervals within this 4-hour block
+            block_intervals = [
+                ((block_start_hour + h_offset) * 4 + (m_offset // 15)) % 96
+                for h_offset in range(4) 
+                for m_offset in [0, 15, 30, 45]
+            ]
+            
             is_holiday = idx.strftime('%Y-%m-%d') in holiday_set
+            
+            # Check if ANY interval in the block has static hochlast
             has_static_hochlast = any(interval in static_hochlast_intervals for interval in block_intervals)
+            
+            # Check if ANY interval in the block has dynamic hochlast
             has_dynamic_hochlast = False
             if _df_peak is not None and hlf_time_cols_for_afrr:
                 date_str = idx.strftime('%Y-%m-%d')
@@ -113,25 +146,34 @@ def precompute_afrr_auction(
                             col_name = hlf_time_cols_for_afrr[interval_in_day]
                             if col_name in day_peak_data.columns and bool(day_peak_data[col_name].iloc[0]):
                                 has_dynamic_hochlast = True
-                                break
+                                break  # Once we find one HLF, the whole block is blocked
+            
+            # If ANY interval has HLF (and it's not a holiday), the entire block is blocked
             afrr_blocks.loc[idx, "is_hochlast"] = (has_static_hochlast or has_dynamic_hochlast) and not is_holiday
 
         afrr_blocks["won"] = afrr_blocks["won_price"] & (~afrr_blocks["is_hochlast"])
         afrr_blocks["cap_payment"] = afrr_blocks["won"] * afrr_blocks['our_bid'] * bid_mw * 4
         afrr_won_blocks = afrr_blocks[afrr_blocks["won"]]
 
-        # Expand mask for plotting
+        # Expand mask for plotting (all 16 intervals in a 4-hour block get the same status)
         afrr_15min_mask_list = []
         for idx, row in afrr_blocks.iterrows():
+            # All 16 intervals in the block get the same won status
             afrr_15min_mask_list.extend([row['won']] * 16)
 
-        full_range_index = pd.date_range(start=afrr_blocks.index.min().date(), end=afrr_blocks.index.max().date() + pd.Timedelta(days=1), freq="15T", tz=afrr_blocks.index.tz)[:-1]
+        full_range_index = pd.date_range(
+            start=afrr_blocks.index.min().date(), 
+            end=afrr_blocks.index.max().date() + pd.Timedelta(days=1), 
+            freq="15T", 
+            tz=afrr_blocks.index.tz
+        )[:-1]
+        
         if len(afrr_15min_mask_list) == len(full_range_index):
             afrr_15min_mask = pd.Series(afrr_15min_mask_list, index=full_range_index)
             if afrr_15min_mask.index.tz is not None:
                 afrr_15min_mask.index = afrr_15min_mask.index.tz_localize(None)
         else:
-             afrr_15min_mask = pd.Series() # return empty series if mismatch
+            afrr_15min_mask = pd.Series()  # return empty series if mismatch
 
     return afrr_won_blocks, afrr_15min_mask
 
@@ -287,7 +329,7 @@ with st.sidebar.expander("📈 Peak Period Restrictions"):
 
     if peak_period_option == "Use Built-in Example Data":
         use_builtin_peak = True
-        st.sidebar.info("📊 Using built-in peak restriction example data")
+        st.sidebar.info("📊 Using built-in HLF example data")
         st.sidebar.markdown("**Dataset:** `Example_Peak Restriktions.csv`")
     elif peak_period_option == "Manual Selection":
         hochlast_morning = st.checkbox("Morning Peak (8-10 AM)", value=True)
@@ -491,7 +533,6 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 if hlf_time_cols: df_processed[hlf_time_cols] = df_processed[hlf_time_cols].fillna(0)
             else: hlf_time_cols = []
             st.success(f"✅ Ready to analyze {len(df_processed)} days of data.")
-            with st.expander("📊 Data Preview"): st.dataframe(df_processed.head())
             with st.spinner("Cleaning data..."):
                 for col in df_processed.columns:
                     if col != 'date': df_processed[col] = df_processed[col].replace([np.inf, -np.inf], np.nan).interpolate(method='linear', limit_direction='both').fillna(df_processed[col].median())
@@ -604,12 +645,6 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         # The savings are now calculated against this realistic daily cash flow.
                         savings = gas_baseline_daily - reported_cash_flow_cost
                         
-                        if optimization_mode == 'DA + aFRR Market':
-                            min_required_soc_headroom = (afrr_bid_mw / η) * Δt
-                            for t in range(len(prices)):
-                                if (t < len(blocked_intervals_for_day) and blocked_intervals_for_day[t] and (Smax - soc[t].value()) < min_required_soc_headroom):
-                                    st.warning(f"SoC Headroom Alert on {day} at interval {t}: Available {(Smax - soc[t].value()):.2f} MWh < Required {min_required_soc_headroom:.2f} MWh.", icon="⚠️"); break
-                        
                         elec_energy = sum([p_el[t].value() * Δt for t in range(len(prices))])
                         gas_fuel_energy = sum([(p_gas[t].value() / boiler_efficiency) * Δt for t in range(len(prices))])
                         
@@ -681,14 +716,48 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             fig1.add_hline(y=avg_savings, line_dash="dash", annotation_text=f"Average: €{avg_savings:.2f}")
             st.plotly_chart(fig1, use_container_width=True)
             results_df['cumulative_savings'] = results_df['savings'].cumsum()
-            fig2 = px.area(results_df, x='date', y='cumulative_savings', title='Cumulative Savings Over Time', labels={'cumulative_savings': 'Total Savings (€)', 'date': 'Date'})
-            st.plotly_chart(fig2, use_container_width=True)
-
             fig3 = go.Figure()
             fig3.add_trace(go.Scatter(x=results_df['date'], y=results_df['elec_energy'], mode='lines', name='Electricity Input', fill='tonexty'))
             fig3.add_trace(go.Scatter(x=results_df['date'], y=results_df['gas_energy'], mode='lines', name='Gas Fuel Input', fill='tozeroy'))
             fig3.update_layout(title='Daily Energy Input Mix', xaxis_title='Date', yaxis_title='Energy (MWh)')
             st.plotly_chart(fig3, use_container_width=True)
+            
+            # Prepare data for monthly aggregation
+            monthly_df = results_df.copy()
+            # Ensure date column is datetime and create a 'month' column for grouping
+            monthly_df['date'] = pd.to_datetime(monthly_df['day'])
+            monthly_df['month'] = monthly_df['date'].dt.to_period('M').astype(str) # Use string for categorical axis
+            
+            # Compute savings excluding aFRR revenue to avoid double counting in the stack
+            monthly_df['savings_ex_afrr'] = monthly_df['gas_baseline_daily'] - (monthly_df['cost'] + monthly_df['afrr_revenue'])
+
+            # Group by month and sum the key financial metrics
+            monthly_summary = monthly_df.groupby('month')[['savings_ex_afrr', 'afrr_revenue']].sum().reset_index()
+
+            # Rename columns for a clearer plot legend
+            monthly_summary.rename(columns={
+                'savings_ex_afrr': 'DA Savings',
+                'afrr_revenue': 'aFRR Revenue'
+            }, inplace=True)
+            
+            # Create the stacked bar chart
+            fig_monthly = px.bar(
+                monthly_summary,
+                x='month',
+                y=['DA Savings', 'aFRR Revenue'],
+                title='Monthly Revenue & Savings Stack',
+                height=500,
+                text_auto=False
+            )
+            
+            # Improve layout
+            fig_monthly.update_layout(
+                xaxis_title='Month',
+                yaxis_title='Total Value (€)',
+                legend_title='Revenue Stream',
+            )
+            
+            st.plotly_chart(fig_monthly, use_container_width=True)
 
             st.header("Sample Period Analysis")
             with st.expander("🔍 Detailed Period Analysis"):
