@@ -1,5 +1,3 @@
-# --- START OF FILE streamlit_thermal_storage_aFRR_dynamic.py ---
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -32,10 +30,6 @@ This application optimizes thermal storage operations to minimize energy costs b
 
 # Add helpful guidance
 st.info("👈 **Getting Started:** Use the sidebar to configure the optimization mode, data sources, and system parameters, then run the optimization below.")
-
-# Fixed version of the precompute_afrr_auction function
-# This ensures that if ANY 15-minute interval within a 4-hour aFRR block has HLF,
-# the ENTIRE block is considered blocked (all-or-nothing logic)
 
 @st.cache_data
 def precompute_afrr_auction(
@@ -182,7 +176,7 @@ st.sidebar.header("📁 Data Source")
 data_source = st.sidebar.radio(
     "Select Price Data Source",
     ("Use Built-in EPEX 2024 Data", "Upload File", "Fetch from EnAppSys API"),
-    index=0,  # Set default to "Use Built-in EPEX 2024 Data"
+    index=0,
     help="Choose the source for Day-Ahead electricity prices."
 )
 
@@ -255,7 +249,7 @@ optimization_mode = st.sidebar.radio(
 )
 
 afrr_price_file = None
-afrr_dynamic_bids_file = None # NEW
+afrr_dynamic_bids_file = None
 use_builtin_afrr = False
 afrr_bid_price = 36.0
 afrr_bid_mw = 2.0
@@ -272,14 +266,33 @@ if optimization_mode == "DA + aFRR Market":
 with st.sidebar.expander("⚙️ Advanced System Parameters"):
     st.markdown("Define the physical properties of the thermal storage asset.")
     Δt = st.number_input("Time Interval (hours)", value=0.25, min_value=0.1, max_value=1.0, step=0.05)
-    Pmax_el = st.number_input("Max Electrical Power (MW)", value=2.0, min_value=0.1, max_value=10.0, step=0.1)
-    Pmax_th = st.number_input("Max Thermal Power (MW)", value=2.0, min_value=0.1, max_value=10.0, step=0.1)
-    Smax = st.number_input("Max Storage Capacity (MWh)", value=8.0, min_value=1.0, max_value=50.0, step=0.5)
+    Pmax_el = st.number_input("Max Electrical Power (MW)", value=2.0, min_value=0.1, max_value=200.0, step=0.1)
+    Pmax_th = st.number_input("Max Thermal Power (MW)", value=2.0, min_value=0.1, max_value=200.0, step=0.1)
+    Smax = st.number_input("Max Storage Capacity (MWh)", value=8.0, min_value=1.0, max_value=1000.0, step=0.5)
     SOC_min = st.number_input("Min Storage Level (MWh)", value=0.0, min_value=0.0, max_value=5.0, step=0.5)
     η = st.number_input("Charging Efficiency", value=0.95, min_value=0.7, max_value=1.0, step=0.05)
     self_discharge_daily = st.number_input("Self-Discharge Rate (% per day)", value=3.0, min_value=0.0, max_value=20.0, step=0.1, help="Daily percentage of stored energy lost due to standing thermal losses.")
     boiler_efficiency_pct = st.number_input("Gas Boiler Efficiency (%)", value=90.0, min_value=50.0, max_value=100.0, step=1.0, help="Efficiency of the gas boiler in converting gas fuel to thermal energy.")
     boiler_efficiency = boiler_efficiency_pct / 100.0
+
+   # --- Power-Capacity Curve UI ---
+    st.markdown("---")
+    enable_power_curve = st.checkbox("Enable Power-Capacity Curve", value=True, help="Model charging/discharging power limits based on State of Charge.")
+    if enable_power_curve:
+        # Define the fixed, constant values for the curve
+        charge_taper_soc_pct = 75
+        charge_power_at_full_pct = 30
+        discharge_taper_soc_pct = 25
+        discharge_power_at_empty_pct = 30
+
+        # Display the fixed values to the user for confirmation
+        st.markdown("#### Charge Curve")
+        st.write(f"Taper starts at: **{charge_taper_soc_pct}%** SOC")
+        st.write(f"Power at 100% SOC: **{charge_power_at_full_pct}%**")
+        
+        st.markdown("#### Discharge Curve")
+        st.write(f"Taper ends at: **{discharge_taper_soc_pct}%** SOC")
+        st.write(f"Power at 0% SOC: **{discharge_power_at_empty_pct}%**")
 
 with st.sidebar.expander("⚖️ Economic & Bidding Parameters"):
     st.markdown("Set costs, prices, and strategic bid values.")
@@ -292,7 +305,6 @@ with st.sidebar.expander("⚖️ Economic & Bidding Parameters"):
         st.markdown("**aFRR Bidding**")
         afrr_bid_mw = st.number_input("Our aFRR Bid Size (MW)", value=2.0, min_value=0.1, max_value=10.0, step=0.1, help="The amount of power capacity to bid. Must be <= Max Electrical Power.")
 
-        # --- NEW: BIDDING STRATEGY SELECTION ---
         afrr_bid_strategy = st.radio(
             "aFRR Bid Strategy",
             ("Static Bid", "Dynamic Bids (from CSV)"),
@@ -353,7 +365,7 @@ with st.sidebar.expander("💾 Cache Management"):
     if 'cached_df_demand' in st.session_state: cached_items.append("✅ Demand Data")
     if 'cached_df_peak' in st.session_state: cached_items.append("✅ Peak Restriction Data")
     if 'cached_df_afrr' in st.session_state: cached_items.append("✅ aFRR Clearing Prices")
-    if 'cached_df_afrr_bids' in st.session_state: cached_items.append("✅ aFRR Dynamic Bids") # NEW
+    if 'cached_df_afrr_bids' in st.session_state: cached_items.append("✅ aFRR Dynamic Bids")
 
     if cached_items:
         st.write("**Cached Data:**"); [st.write(item) for item in cached_items]
@@ -463,9 +475,8 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     st.session_state['cached_peak_config_key'] = peak_config_key
                 except Exception as e: st.error(f"❌ A critical error occurred while processing the peak restriction file: {e}"); st.stop()
 
-    # --- aFRR Data Loading ---
     df_afrr = None
-    df_afrr_bids = None # NEW
+    df_afrr_bids = None
     if optimization_mode == 'DA + aFRR Market':
         need_afrr_data = False
         afrr_source = None
@@ -488,7 +499,6 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         st.session_state['cached_afrr_config_key'] = afrr_config_key
                     except Exception as e: st.error(f"❌ aFRR file processing failed: {e}"); st.stop()
 
-        # --- NEW: DYNAMIC BID FILE LOGIC ---
         if afrr_bid_strategy == 'Dynamic Bids (from CSV)':
             if afrr_dynamic_bids_file is None:
                 st.warning("Dynamic bid strategy selected. Please upload your bid price CSV file."); st.stop()
@@ -502,13 +512,12 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     try:
                         df_afrr_bids = pd.read_csv(afrr_dynamic_bids_file)
                         df_afrr_bids['datetime'] = pd.to_datetime(df_afrr_bids['Date (CET)'])
-                        df_afrr_bids = df_afrr_bids.set_index('datetime')[['Bid Price']] # Ensure only bid price column is kept
+                        df_afrr_bids = df_afrr_bids.set_index('datetime')[['Bid Price']]
                         st.success("✅ aFRR dynamic bid data loaded successfully!")
                         st.session_state['cached_df_afrr_bids'] = df_afrr_bids.copy()
                         st.session_state['cached_bids_config_key'] = bids_config_key
                     except Exception as e: st.error(f"❌ aFRR dynamic bid file processing failed: {e}. Ensure it has 'Date (CET)' and 'Bid Price' columns."); st.stop()
 
-    # --- Main App Logic ---
     if df_price is not None:
         try:
             st.sidebar.header("🗓️ Date Range Filter")
@@ -538,23 +547,15 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     if col != 'date': df_processed[col] = df_processed[col].replace([np.inf, -np.inf], np.nan).interpolate(method='linear', limit_direction='both').fillna(df_processed[col].median())
             st.success("✅ Data cleaning completed")
 
-            # --- aFRR Pre-computation (NOW CACHED) ---
             afrr_15min_mask, afrr_won_blocks = None, None
             if optimization_mode == 'DA + aFRR Market' and df_afrr is not None:
-                # This block now calls a cached function. It will only run the
-                # full computation if the underlying data or parameters change.
-                # Otherwise, it returns the stored result instantly.
                 st.header("⚡ aFRR Auction Pre-computation")
                 with st.spinner("Analyzing aFRR bids (using cache if available)..."):
                     afrr_won_blocks, afrr_15min_mask = precompute_afrr_auction(
-                        _df_afrr=df_afrr,
-                        afrr_bid_strategy=afrr_bid_strategy,
-                        static_bid_price=afrr_bid_price,
-                        _df_afrr_bids=df_afrr_bids,
-                        _df_peak=df_peak,
-                        holiday_set=holiday_set,
-                        static_hochlast_intervals=hochlast_intervals_static,
-                        bid_mw=afrr_bid_mw
+                        _df_afrr=df_afrr, afrr_bid_strategy=afrr_bid_strategy,
+                        static_bid_price=afrr_bid_price, _df_afrr_bids=df_afrr_bids,
+                        _df_peak=df_peak, holiday_set=holiday_set,
+                        static_hochlast_intervals=hochlast_intervals_static, bid_mw=afrr_bid_mw
                     )
 
                 if afrr_won_blocks is not None and not afrr_won_blocks.empty:
@@ -564,30 +565,87 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 else:
                     st.warning("⚠️ Could not perform aFRR pre-computation. Check aFRR data sources.")
 
-            # --- Model Definition & Execution ---
             if df_demand is not None:
                 price_time_cols = [col for col in df_processed.columns if col.endswith('_price')]
                 demand_time_cols = [col for col in df_processed.columns if col.endswith('_demand')]
             else:
                 price_time_cols = [col for col in df_processed.columns if col != 'date' and not col.endswith('_hlf')]
                 demand_time_cols = []
-
-            def build_thermal_model(prices, demand_profile, soc0, η_self, boiler_eff, peak_restrictions=None, is_holiday=False, blocked_intervals=None):
+            
+            # --- REVISED and IMPROVED: build_thermal_model function ---
+            def build_thermal_model(prices, demand_profile, soc0, η_self, boiler_eff, 
+                                    peak_restrictions=None, is_holiday=False, blocked_intervals=None,
+                                    enable_curve=False, curve_params=None):
                 T = len(prices)
                 model = LpProblem("Thermal_Storage_Optimization", LpMinimize)
                 p_el = LpVariable.dicts("p_el", range(T), lowBound=0, upBound=Pmax_el)
                 p_th = LpVariable.dicts("p_th", range(T), lowBound=0, upBound=Pmax_th)
                 p_gas = LpVariable.dicts("p_gas", range(T), lowBound=0)
                 soc = LpVariable.dicts("soc", range(T), lowBound=SOC_min, upBound=Smax)
+                
                 model += lpSum([(prices[t] + C_grid) * p_el[t] * Δt + (C_gas / boiler_eff) * p_gas[t] * Δt for t in range(T)]) - terminal_value * soc[T-1]
+
+                # --- Improved curve logic based on the two-constraint method ---
+                if enable_curve and curve_params is not None:
+                    # Get dimensionless parameters from UI
+                    s_cut_charge_frac = curve_params['charge_start_pct'] / 100.0
+                    p_min_charge_frac = curve_params['charge_end_pct'] / 100.0
+                    
+                    s_cut_discharge_frac = curve_params['discharge_start_pct'] / 100.0
+                    p_min_discharge_frac = curve_params['discharge_end_pct'] / 100.0
+                    
+                    # Convert to absolute SOC values
+                    soc_charge_knee = s_cut_charge_frac * Smax
+                    soc_discharge_knee = s_cut_discharge_frac * Smax
+
+                    # Calculate slope and intercept for the sloped part of the charge curve
+                    # P_charge = m * SOC + b
+                    if (Smax - soc_charge_knee) > 1e-6: # Avoid division by zero
+                        power_at_full = p_min_charge_frac * Pmax_el
+                        m_charge = (power_at_full - Pmax_el) / (Smax - soc_charge_knee)
+                        b_charge = Pmax_el - m_charge * soc_charge_knee
+                    else:
+                        m_charge, b_charge = None, None
+
+                    # Calculate slope and intercept for the sloped part of the discharge curve
+                    # P_discharge = m * SOC + b
+                    if (soc_discharge_knee - SOC_min) > 1e-6: # Avoid division by zero
+                        power_at_empty = p_min_discharge_frac * Pmax_th
+                        m_discharge = (Pmax_th - power_at_empty) / (soc_discharge_knee - SOC_min)
+                        b_discharge = power_at_empty - m_discharge * SOC_min
+                    else:
+                        m_discharge, b_discharge = None, None
+                # --- End of curve logic setup ---
+                
                 for t in range(T):
                     model += p_th[t] + p_gas[t] == demand_profile[t]
+                    
+                    # Standard restrictions
                     if not is_holiday:
                         if t in hochlast_intervals_static: model += p_el[t] == 0
                         elif peak_restrictions is not None and len(peak_restrictions) > t and peak_restrictions[t] == 1: model += p_el[t] == 0
                     if blocked_intervals and len(blocked_intervals) > t and blocked_intervals[t]: model += p_el[t] == 0
+
+                    # --- Applying the improved curve constraints ---
+                    if enable_curve and curve_params is not None:
+                        prev_soc = soc[t-1] if t > 0 else soc0
+                        
+                        # Charge constraints (based on soc[t-1])
+                        if m_charge is not None:
+                            # The solver will enforce the minimum of these two constraints automatically
+                            model += p_el[t] <= Pmax_el, f"ChargeCurve_Flat_{t}"
+                            model += p_el[t] <= m_charge * prev_soc + b_charge, f"ChargeCurve_Sloped_{t}"
+                        
+                        # Discharge constraints (based on soc[t-1])
+                        if m_discharge is not None:
+                            # The solver will enforce the minimum of these two constraints automatically
+                            model += p_th[t] <= Pmax_th, f"DischargeCurve_Flat_{t}"
+                            model += p_th[t] <= m_discharge * prev_soc + b_discharge, f"DischargeCurve_Sloped_{t}"
+
+                    # SOC dynamics
                     if t == 0: model += soc[t] == soc0 * η_self + η * p_el[t] * Δt - p_th[t] * Δt
                     else: model += soc[t] == soc[t-1] * η_self + η * p_el[t] * Δt - p_th[t] * Δt
+                        
                 return model, p_el, p_th, p_gas, soc
 
             if st.button("🚀 Run Optimization", type="primary"):
@@ -599,6 +657,16 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 soc0 = SOC_min
                 results, all_trades, all_baselines = [], [], []
                 η_self = (1 - self_discharge_daily / 100) ** (Δt / 24)
+                
+                # --- Collect curve parameters for the model ---
+                curve_params = None
+                if enable_power_curve:
+                    curve_params = {
+                        'charge_start_pct': charge_taper_soc_pct,
+                        'charge_end_pct': charge_power_at_full_pct,
+                        'discharge_start_pct': discharge_taper_soc_pct,
+                        'discharge_end_pct': discharge_power_at_empty_pct
+                    }
 
                 for idx, (_, row) in enumerate(df_processed.iterrows()):
                     progress_bar.progress((idx + 1) / len(df_processed))
@@ -630,19 +698,19 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     is_holiday = day in holiday_set
                     peak_restrictions_for_day = row[hlf_time_cols].values if (df_peak is not None and hlf_time_cols) else None
 
-                    model, p_el, p_th, p_gas, soc = build_thermal_model(prices, demand_profile, soc0, η_self, boiler_efficiency, peak_restrictions_for_day, is_holiday, blocked_intervals_for_day)
+                    # --- Pass curve parameters to the model builder ---
+                    model, p_el, p_th, p_gas, soc = build_thermal_model(
+                        prices, demand_profile, soc0, η_self, boiler_efficiency, 
+                        peak_restrictions_for_day, is_holiday, blocked_intervals_for_day,
+                        enable_curve=enable_power_curve, curve_params=curve_params
+                    )
                     status = model.solve(PULP_CBC_CMD(msg=False))
                     if status == 1:
                         soc_end = soc[len(prices)-1].value()
                         elec_cost = sum((prices[t] + C_grid) * p_el[t].value() * Δt for t in range(len(prices)))
                         gas_cost = sum(C_gas * (p_gas[t].value() / boiler_efficiency) * Δt for t in range(len(prices)))
 
-                        # --- MODIFIED SAVINGS CALCULATION ---
-                        # Calculate the cost for reporting based on real cash flow for the day.
-                        # The terminal value credit is EXCLUDED from this reporting calculation.
                         reported_cash_flow_cost = elec_cost + gas_cost - daily_afrr_revenue
-                        
-                        # The savings are now calculated against this realistic daily cash flow.
                         savings = gas_baseline_daily - reported_cash_flow_cost
                         
                         elec_energy = sum([p_el[t].value() * Δt for t in range(len(prices))])
@@ -660,7 +728,6 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         
                         soc0 = soc_end
                         
-                        # Use the corrected cost and savings in the results
                         results.append({"day": day, "cost": reported_cash_flow_cost, "savings": savings, "soc_end": soc_end, "elec_energy": elec_energy, "gas_energy": gas_fuel_energy, "is_holiday": is_holiday, "gas_baseline_daily": gas_baseline_daily, "afrr_revenue": daily_afrr_revenue})
 
                 progress_bar.progress(1.0); status_text.text("✅ Optimization completed!")
@@ -668,7 +735,6 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 st.session_state['gas_baseline'] = np.mean(all_baselines) if all_baselines else 0
         except Exception as e: st.error(f"❌ An error occurred during optimization: {str(e)}"); st.stop()
 
-        # --- Display Results ---
         if 'results' in st.session_state and st.session_state['results']:
             results, all_trades, gas_baseline = st.session_state['results'], st.session_state['all_trades'], st.session_state['gas_baseline']
             results_df = pd.DataFrame(results); results_df['date'] = pd.to_datetime(results_df['day'])
@@ -722,41 +788,16 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             fig3.update_layout(title='Daily Energy Input Mix', xaxis_title='Date', yaxis_title='Energy (MWh)')
             st.plotly_chart(fig3, use_container_width=True)
             
-            # Prepare data for monthly aggregation
             monthly_df = results_df.copy()
-            # Ensure date column is datetime and create a 'month' column for grouping
             monthly_df['date'] = pd.to_datetime(monthly_df['day'])
-            monthly_df['month'] = monthly_df['date'].dt.to_period('M').astype(str) # Use string for categorical axis
+            monthly_df['month'] = monthly_df['date'].dt.to_period('M').astype(str)
             
-            # Compute savings excluding aFRR revenue to avoid double counting in the stack
             monthly_df['savings_ex_afrr'] = monthly_df['gas_baseline_daily'] - (monthly_df['cost'] + monthly_df['afrr_revenue'])
-
-            # Group by month and sum the key financial metrics
             monthly_summary = monthly_df.groupby('month')[['savings_ex_afrr', 'afrr_revenue']].sum().reset_index()
-
-            # Rename columns for a clearer plot legend
-            monthly_summary.rename(columns={
-                'savings_ex_afrr': 'DA Savings',
-                'afrr_revenue': 'aFRR Revenue'
-            }, inplace=True)
+            monthly_summary.rename(columns={'savings_ex_afrr': 'DA Savings', 'afrr_revenue': 'aFRR Revenue'}, inplace=True)
             
-            # Create the stacked bar chart
-            fig_monthly = px.bar(
-                monthly_summary,
-                x='month',
-                y=['DA Savings', 'aFRR Revenue'],
-                title='Monthly Revenue & Savings Stack',
-                height=500,
-                text_auto=False
-            )
-            
-            # Improve layout
-            fig_monthly.update_layout(
-                xaxis_title='Month',
-                yaxis_title='Total Value (€)',
-                legend_title='Revenue Stream',
-            )
-            
+            fig_monthly = px.bar(monthly_summary, x='month', y=['DA Savings', 'aFRR Revenue'], title='Monthly Revenue & Savings Stack', height=500)
+            fig_monthly.update_layout(xaxis_title='Month', yaxis_title='Total Value (€)', legend_title='Revenue Stream')
             st.plotly_chart(fig_monthly, use_container_width=True)
 
             st.header("Sample Period Analysis")
@@ -800,7 +841,42 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                     zip_file.writestr('thermal_storage_trades.csv', trades_df.to_csv(index=False))
                     zip_file.writestr('thermal_storage_daily.csv', results_df.to_csv(index=False))
-                    params_text = f"Thermal Storage Optimization Parameters\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\nDemand Option: {demand_option}\nSystem Parameters:\n- Time Interval: {Δt} hours\n- Max Electrical Power: {Pmax_el} MW\n- Max Thermal Power: {Pmax_th} MW\n- Max Storage Capacity: {Smax} MWh\n- Min Storage Level: {SOC_min} MWh\n- Charging Efficiency: {η}\n- Self-Discharge Rate: {self_discharge_daily} % per day\n- Grid Charges: {C_grid} €/MWh\n- Gas Price: {C_gas} €/MWh\n- Gas Boiler Efficiency: {boiler_efficiency_pct} %\n- Terminal Value: {terminal_value} €/MWh\n\nResults Summary:\n- Days Analyzed: {len(results)}\n- Average Daily Savings: €{avg_savings:.2f} ({savings_pct:.1f}%)\n- Total Savings: €{total_savings:.2f}\n- Thermal Contribution from Electricity: {elec_percentage:.1f}%\n- Break-even Price: {break_even_price:.1f} €/MWh\n"
+                    
+                    params_text = (
+                        f"Thermal Storage Optimization Parameters\n"
+                        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                        f"Demand Option: {demand_option}\n"
+                        f"System Parameters:\n"
+                        f"- Time Interval: {Δt} hours\n"
+                        f"- Max Electrical Power: {Pmax_el} MW\n"
+                        f"- Max Thermal Power: {Pmax_th} MW\n"
+                        f"- Max Storage Capacity: {Smax} MWh\n"
+                        f"- Min Storage Level: {SOC_min} MWh\n"
+                        f"- Charging Efficiency: {η}\n"
+                        f"- Self-Discharge Rate: {self_discharge_daily} % per day\n"
+                        f"- Gas Boiler Efficiency: {boiler_efficiency_pct} %\n\n"
+                        f"Economic Parameters:\n"
+                        f"- Grid Charges: {C_grid} €/MWh\n"
+                        f"- Gas Price: {C_gas} €/MWh\n"
+                        f"- Terminal Value: {terminal_value} €/MWh\n\n"
+                    )
+                    if enable_power_curve:
+                        params_text += (
+                            f"Power-Capacity Curve (Enabled):\n"
+                            f"- Charge Taper Start SOC: {charge_taper_soc_pct} %\n"
+                            f"- Charge Power at 100% SOC: {charge_power_at_full_pct} % of Pmax\n"
+                            f"- Discharge Taper Start SOC: {discharge_taper_soc_pct} %\n"
+                            f"- Discharge Power at Min SOC: {discharge_power_at_empty_pct} % of Pmax\n\n"
+                        )
+                    params_text += (
+                        f"Results Summary:\n"
+                        f"- Days Analyzed: {len(results)}\n"
+                        f"- Average Daily Savings: €{avg_savings:.2f} ({savings_pct:.1f}%)\n"
+                        f"- Total Savings: €{total_savings:.2f}\n"
+                        f"- Thermal Contribution from Electricity: {elec_percentage:.1f}%\n"
+                        f"- Break-even Price: {break_even_price:.1f} €/MWh\n"
+                    )
+                    
                     zip_file.writestr('parameters_and_summary.txt', params_text)
                 zip_buffer.seek(0)
                 st.download_button(label="📥 Download All Results (ZIP)", data=zip_buffer.getvalue(), file_name=f"thermal_storage_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", mime="application/zip")
