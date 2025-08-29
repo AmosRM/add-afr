@@ -413,7 +413,7 @@ with st.sidebar.expander("⚖️ Economic & Bidding Parameters"):
         if enable_afrr_capacity:
             st.markdown("---")
             st.markdown("**aFRR Capacity Market**")
-            afrr_bid_mw = st.number_input("Our aFRR Bid Size (MW)", value=2.0, min_value=0.1, max_value=10.0, step=0.1, help="The amount of power capacity to bid. Must be <= Max Electrical Power.")
+            afrr_bid_mw = st.number_input("Our aFRR Bid Size (MW)", value=2.0, min_value=0.1, max_value=100.0, step=0.1, help="The amount of power capacity to bid. Must be <= Max Electrical Power.")
 
             afrr_bid_strategy = st.radio(
                 "aFRR Bid Strategy",
