@@ -331,10 +331,6 @@ use_builtin_afrr = False
 afrr_bid_price = 36.0
 afrr_bid_mw = 2.0
 afrr_energy_bid_base = 36.0
-soc_premium_table = {
-    0.0: 0.0, 1.0: 0.0, 2.0: 0.0, 3.0: 10.0,
-    4.0: 40.0, 7.5: 300.0, 8.0: 10000.0
-}
 
 # Individual checkboxes for aFRR components - only show when aFRR is selected
 enable_afrr_capacity = False
@@ -442,11 +438,58 @@ with st.sidebar.expander("⚖️ Economic & Bidding Parameters"):
             )
             st.markdown("**SOC-based Premium Schedule**")
             st.caption("Premium increases with SOC to avoid winning when battery is full")
-            premium_df = pd.DataFrame(
-                list(soc_premium_table.items()),
-                columns=['SOC (MWh)', 'Premium (€/MWh)']
-            )
-            st.dataframe(premium_df, use_container_width=True, hide_index=True)
+            
+            # Create editable premium table
+            col1, col2 = st.columns([6, 1])
+            with col1:
+                # Initialize default premium table if not in session state
+                if 'soc_premium_table' not in st.session_state:
+                    st.session_state.soc_premium_table = {
+                        0.0: 0.0, 1.0: 0.0, 2.0: 0.0, 3.0: 10.0,
+                        4.0: 40.0, 7.5: 300.0, 8.0: 10000.0
+                    }
+                
+                # Create editable dataframe
+                premium_df = pd.DataFrame(
+                    list(st.session_state.soc_premium_table.items()),
+                    columns=['SOC (MWh)', 'Premium (€/MWh)']
+                )
+                
+                # Use st.data_editor for editable table
+                edited_premium_df = st.data_editor(
+                    premium_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    num_rows="dynamic",
+                    key="premium_table_editor"
+                )
+                
+                # Update session state when table is edited
+                if not edited_premium_df.equals(premium_df):
+                    new_premium_table = {}
+                    for _, row in edited_premium_df.iterrows():
+                        soc = float(row['SOC (MWh)'])
+                        premium = float(row['Premium (€/MWh)'])
+                        new_premium_table[soc] = premium
+                    st.session_state.soc_premium_table = new_premium_table
+                
+                # Use the current premium table from session state
+                soc_premium_table = st.session_state.soc_premium_table
+            
+            with col2:
+                if st.button("Reset"):
+                    st.session_state.soc_premium_table = {
+                        0.0: 0.0, 1.0: 0.0, 2.0: 0.0, 3.0: 10.0,
+                        4.0: 40.0, 7.5: 300.0, 8.0: 10000.0
+                    }
+                    st.rerun()
+                
+    else:
+        # Default premium table when aFRR energy is not enabled
+        soc_premium_table = {
+            0.0: 0.0, 1.0: 0.0, 2.0: 0.0, 3.0: 10.0,
+            4.0: 40.0, 7.5: 300.0, 8.0: 10000.0
+        }
 
 with st.sidebar.expander("🔥 Thermal Demand Configuration"):
     demand_option = st.radio("Select Demand Source", ('Constant Demand', 'Upload Demand Profile'), help="Choose a fixed, constant demand or upload a CSV file with a time-varying demand profile.")
