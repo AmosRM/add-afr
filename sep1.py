@@ -434,7 +434,7 @@ with st.sidebar.expander("⚖️ Economic & Bidding Parameters"):
                 value=36.0,
                 min_value=0.0,
                 step=1.0,
-                help="Base bid price for aFRR energy. Premium will be added based on SOC."
+                help="Base bid price for aFRR energy. Premium will be applied based on SOC."
             )
             st.markdown("**SOC-based Premium Schedule**")
             st.caption("Premium increases with SOC to avoid winning when battery is full")
@@ -496,7 +496,7 @@ with st.sidebar.expander("🔥 Thermal Demand Configuration"):
     D_th = None
     demand_file = None
     if demand_option == 'Constant Demand':
-        D_th = st.number_input("Thermal Demand (MW)", value=1.0, min_value=0.0, max_value=10.0, step=0.1)
+        D_th = st.number_input("Thermal Demand (MW)", value=1.0, min_value=0.0, max_value=20.0, step=0.1)
     else:
         demand_file = st.file_uploader("Upload customer demand data (CSV)", type=['csv'])
 
@@ -648,7 +648,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     st.session_state['cached_peak_config_key'] = peak_config_key
                 except Exception as e: st.error(f"❌ A critical error occurred while processing the peak restriction file: {e}"); st.stop()
 
-    # --- START: SEPARATE aFRR DATA LOADING (FIX) ---
+    # SEPARATE aFRR DATA LOADING (FIX) ---
     df_afrr_capacity = None
     df_afrr_energy = None
     df_afrr_bids = None
@@ -709,8 +709,6 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
     if optimization_mode == "DA + aFRR Market" and enable_afrr_capacity and afrr_bid_strategy == 'Dynamic Bids (from CSV)':
         if afrr_dynamic_bids_file is None:
             st.warning("Dynamic bid strategy selected. Please upload your bid price CSV file."); st.stop()
-        # ... rest of bid file loading logic
-    # --- END: SEPARATE aFRR DATA LOADING ---
 
     if df_price is not None:
         try:
@@ -743,7 +741,6 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             st.success("✅ Data cleaning completed")
 
             afrr_15min_mask, afrr_won_blocks = None, None
-            # --- START: CORRECTED FUNCTION CALL (FIX) ---
             if optimization_mode == "DA + aFRR Market" and enable_afrr_capacity and df_afrr_capacity is not None:
                 st.header("⚡ aFRR Capacity Auction Pre-computation")
                 with st.spinner("Analyzing aFRR capacity bids (using cache if available)..."):
@@ -753,7 +750,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         _df_peak=df_peak, holiday_set=holiday_set,
                         static_hochlast_intervals=hochlast_intervals_static, bid_mw=afrr_bid_mw
                     )
-            # --- END: CORRECTED FUNCTION CALL ---
+                    
                 if afrr_won_blocks is not None and not afrr_won_blocks.empty:
                     st.success(f"✅ Pre-computation complete. Found {len(afrr_won_blocks)} won aFRR blocks.")
                 elif afrr_won_blocks is not None:
@@ -763,13 +760,13 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
 
             afrr_clearing_prices_series = None
             afrr_activation_profile_series = None
-            # --- START: CORRECTED FUNCTION CALL (FIX) ---
+            
             if optimization_mode == "DA + aFRR Market" and enable_afrr_energy and df_afrr_energy is not None:
                 st.header("⚡ aFRR Energy Market Analysis")
                 with st.spinner("Extracting aFRR energy prices and activation profile..."):
                     afrr_clearing_prices_series = extract_afrr_clearing_prices(df_afrr_energy)
                     afrr_activation_profile_series = extract_afrr_activation_profile(df_afrr_energy)
-            # --- END: CORRECTED FUNCTION CALL ---
+                    
                     if afrr_clearing_prices_series is not None:
                         st.success(f"✅ Extracted {len(afrr_clearing_prices_series)} clearing price points")
                     
@@ -780,7 +777,6 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     else:
                         st.info("📊 Using default 100% activation profile")
 
-            # ... The rest of the file (build_thermal_model, the optimization loop, and results display) remains unchanged ...
             if df_demand is not None:
                 price_time_cols = [col for col in df_processed.columns if col.endswith('_price')]
                 demand_time_cols = [col for col in df_processed.columns if col.endswith('_demand')]
@@ -788,8 +784,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 price_time_cols = [col for col in df_processed.columns if col != 'date' and not col.endswith('_hlf')]
                 demand_time_cols = []
             
-            # Replace the existing `build_thermal_model` function in your script with this one.
-            
+
             def build_thermal_model(prices, demand_profile, soc0, η_self, boiler_eff, 
                                     peak_restrictions=None, is_holiday=False, afrr_commitment_mask=None,
                                     afrr_activation_profile=None, afrr_clearing_prices=None,
@@ -804,11 +799,9 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 p_gas = LpVariable.dicts("p_gas", range(T), lowBound=0)
                 soc = LpVariable.dicts("soc", range(T), lowBound=SOC_min, upBound=Smax)
                 
-                # aFRR energy variables
+                # aFRR energy variables (no binary variable needed anymore)
                 p_el_afrr = LpVariable.dicts("p_el_afrr", range(T), lowBound=0)
-                afrr_energy_won = LpVariable.dicts("afrr_energy_won", range(T), cat='Binary')
-                
-                # --- START: HOURLY POWER CONSTRAINT FOR DA MARKET (REINSTATED) ---
+
                 # Iterate through the timeline in hourly chunks (4 intervals of 15 mins)
                 for hour_idx, t in enumerate(range(0, T, 4)):
                     # Ensure we don't go out of bounds if T is not a multiple of 4
@@ -817,25 +810,19 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         model += p_el_da[t+1] == p_el_da[t], f"HourlyPower_DA_H{hour_idx}_Int1"
                         model += p_el_da[t+2] == p_el_da[t], f"HourlyPower_DA_H{hour_idx}_Int2"
                         model += p_el_da[t+3] == p_el_da[t], f"HourlyPower_DA_H{hour_idx}_Int3"
-                # --- END: HOURLY POWER CONSTRAINT ---
-                
-                # Calculate aFRR energy revenue
-                afrr_energy_revenues = []
-                for t in range(T):
-                    if afrr_clearing_prices is not None and afrr_activation_profile is not None:
-                        # Use a safe default of 0 if index is out of bounds
-                        clearing_price = safe_float_convert(afrr_clearing_prices[t]) if t < len(afrr_clearing_prices) else 0.0
-                        activation_frac = (safe_float_convert(afrr_activation_profile[t]) / 100.0) if t < len(afrr_activation_profile) else 0.0
-                        afrr_energy_revenues.append(-clearing_price * activation_frac * p_el_afrr[t] * Δt)
-                    else:
-                        afrr_energy_revenues.append(0)
-                
+               
                 # Objective function
                 da_costs = lpSum([(prices[t] + C_grid) * p_el_da[t] * Δt for t in range(T)])
                 gas_costs = lpSum([(C_gas / boiler_eff) * p_gas[t] * Δt for t in range(T)])
-                afrr_revenue = lpSum(afrr_energy_revenues)
                 
-                model += da_costs + gas_costs - afrr_revenue - terminal_value * soc[T-1]
+                # This term handles both costs (positive clearing price) and revenues (negative clearing price) and correctly includes grid charges.
+                afrr_energy_costs = lpSum([
+                    ( (safe_float_convert(afrr_clearing_prices[t]) if afrr_clearing_prices is not None and t < len(afrr_clearing_prices) else 0.0) + C_grid) 
+                    * p_el_afrr[t] * Δt 
+                    for t in range(T)
+                ])
+                
+                model += da_costs + gas_costs + afrr_energy_costs - terminal_value * soc[T-1]
                 
                 # Power curve parameters if enabled
                 if enable_curve and curve_params is not None:
@@ -850,15 +837,13 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         power_at_full = p_min_charge_frac * Pmax_el
                         m_charge = (power_at_full - Pmax_el) / (Smax - soc_charge_knee)
                         b_charge = Pmax_el - m_charge * soc_charge_knee
-                    else:
-                        m_charge, b_charge = None, None
+                    else: m_charge, b_charge = None, None
                         
                     if (soc_discharge_knee - SOC_min) > 1e-6:
                         power_at_empty = p_min_discharge_frac * Pmax_th
                         m_discharge = (Pmax_th - power_at_empty) / (soc_discharge_knee - SOC_min)
                         b_discharge = power_at_empty - m_discharge * SOC_min
-                    else:
-                        m_discharge, b_discharge = None, None
+                    else: m_discharge, b_discharge = None, None
                 
                 # Main constraints
                 for t in range(T):
@@ -868,49 +853,53 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     # Combined power constraint
                     model += p_el_da[t] + p_el_afrr[t] <= Pmax_el
                     
-                    # aFRR ENERGY MARKET PARTICIPATION
+                    # AFRR ENERGY MARKET PARTICIPATION ---
                     if afrr_clearing_prices is not None and soc_premium_table is not None:
                         clearing_price = safe_float_convert(afrr_clearing_prices[t]) if t < len(afrr_clearing_prices) else 0.0
-                        
-                        # Calculate effective bid with SOC premium
-                        estimated_soc = float(min(soc0 + t * 0.1, Smax))
+                        activation_frac = (safe_float_convert(afrr_activation_profile[t]) / 100.0) if afrr_activation_profile is not None and t < len(afrr_activation_profile) else 1.0
+
+                        # estimated_soc = float(min(soc0 + t * 0.1, Smax)) # Keeping original simple estimate for linearity
+                        if t == 0:
+                            estimated_soc = float(soc0)
+                        else:
+                            # Use the actual SOC from previous interval
+                            # This requires accessing the variable's value, which is tricky in LP
+                            # A better approach is to use soc0 for the entire day's planning
+                            estimated_soc = float(soc0)  # Use day-start SOC for all intervals
                         premium = 0.0
                         soc_levels = sorted([float(k) for k in soc_premium_table.keys()])
                         for i in range(len(soc_levels) - 1):
-                            if estimated_soc >= soc_levels[i] and estimated_soc <= soc_levels[i+1]:
+                            if soc_levels[i] <= estimated_soc <= soc_levels[i+1]:
                                 soc_range = soc_levels[i+1] - soc_levels[i]
-                                premium_range = float(soc_premium_table[soc_levels[i+1]]) - float(soc_premium_table[soc_levels[i]])
                                 if soc_range > 0:
-                                    premium = float(soc_premium_table[soc_levels[i]]) + \
-                                            (estimated_soc - soc_levels[i]) * premium_range / soc_range
+                                    weight = (estimated_soc - soc_levels[i]) / soc_range
+                                    premium = (1 - weight) * float(soc_premium_table[soc_levels[i]]) + weight * float(soc_premium_table[soc_levels[i+1]])
                                 else:
                                     premium = float(soc_premium_table[soc_levels[i]])
                                 break
                         if estimated_soc >= soc_levels[-1]:
                             premium = float(soc_premium_table[soc_levels[-1]])
                         
-                        effective_bid = float(afrr_energy_bid_base) + premium
+                        # Effective bid increases with SOC to make us less competitive when storage is full
+                        effective_bid = float(afrr_energy_bid_base) - premium
                         
-                        # Determine if we win
-                        if clearing_price >= effective_bid:
-                            model += p_el_afrr[t] <= Pmax_el * afrr_energy_won[t]
-                            if clearing_price > effective_bid + 10:
-                                model += afrr_energy_won[t] >= 0.8
+                        # We "win" (get activated) if the market clearing price is less than or equal to our bid.
+                        # This means the system will pay us (negative price) or we pay less than our max willingness.
+                        if clearing_price <= effective_bid:
+                            # MUST charge exactly at the activation rate
+                            required_power = Pmax_el * activation_frac
+                            model += p_el_afrr[t] == required_power  # EQUALITY constraint
                         else:
                             model += p_el_afrr[t] == 0
-                            model += afrr_energy_won[t] == 0
                     else:
+                        # aFRR energy market is disabled
                         model += p_el_afrr[t] == 0
                     
                     # DA market restrictions
                     is_da_restricted = False
                     if not is_holiday:
-                        if t in hochlast_intervals_static:
-                            is_da_restricted = True
-                            model += p_el_afrr[t] == 0
-                        elif peak_restrictions is not None and len(peak_restrictions) > t and peak_restrictions[t] == 1:
-                            is_da_restricted = True
-                            model += p_el_afrr[t] == 0
+                        if t in hochlast_intervals_static: is_da_restricted = True
+                        elif peak_restrictions is not None and len(peak_restrictions) > t and peak_restrictions[t] == 1: is_da_restricted = True
                     
                     if afrr_commitment_mask and len(afrr_commitment_mask) > t and afrr_commitment_mask[t]:
                         is_da_restricted = True
@@ -938,7 +927,8 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     else:
                         model += soc[t] == soc[t-1] * η_self + η * total_charging * Δt - p_th[t] * Δt
                 
-                return model, p_el_da, p_th, p_gas, soc, p_el_afrr, afrr_energy_won
+                # The binary variable is no longer used, return None in its place
+                return model, p_el_da, p_th, p_gas, soc, p_el_afrr, None
 
             if st.button("🚀 Run Optimization", type="primary"):
                 if 'results' in st.session_state: del st.session_state['results']
@@ -1012,7 +1002,8 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                             num_to_copy = min(len(prices), len(source_data))
                             daily_afrr_activation_profile[:num_to_copy] = source_data[:num_to_copy]
                     
-                    model, p_el_da, p_th, p_gas, soc, p_el_afrr, afrr_energy_won = build_thermal_model(
+                    # The build_thermal_model function no longer returns afrr_energy_won
+                    model, p_el_da, p_th, p_gas, soc, p_el_afrr, _ = build_thermal_model(
                         prices, demand_profile, soc0, η_self, boiler_efficiency,
                         peak_restrictions_for_day, is_holiday, blocked_intervals_for_day,
                         daily_afrr_activation_profile, daily_clearing_prices,
@@ -1024,10 +1015,45 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     if status == 1:
                         soc_end = soc[len(prices)-1].value()
                         elec_cost_da = sum((prices[t] + C_grid) * p_el_da[t].value() * Δt for t in range(len(prices)))
-                        afrr_energy_revenue = sum(daily_clearing_prices[t] * p_el_afrr[t].value() * Δt for t in range(len(prices))) if daily_clearing_prices is not None else 0
                         gas_cost = sum(C_gas * (p_gas[t].value() / boiler_efficiency) * Δt for t in range(len(prices)))
 
-                        reported_cash_flow_cost = elec_cost_da + gas_cost - daily_afrr_cap_revenue - afrr_energy_revenue
+                        # --- DETAILED aFRR Energy Savings Analysis ---
+                        afrr_energy_details = []
+                        for t in range(len(prices)):
+                            if p_el_afrr[t].value() > 0.01:  # Only count when actually charging
+                                clearing_price = safe_float_convert(daily_clearing_prices[t]) if daily_clearing_prices is not None else 0.0
+                                power = p_el_afrr[t].value()
+                                
+                                # Cost to charge via aFRR (including grid charges)
+                                afrr_cost_per_mwh = clearing_price + C_grid
+                                thermal_via_afrr = power * Δt * η  # Thermal energy gained
+                                cost_for_thermal = (afrr_cost_per_mwh * power * Δt) / η  # Cost per MWh thermal
+                                
+                                # Gas alternative cost for same thermal energy
+                                gas_alternative_cost = thermal_via_afrr * (C_gas / boiler_efficiency)
+                                
+                                # Savings compared to gas
+                                savings_vs_gas = gas_alternative_cost - (afrr_cost_per_mwh * power * Δt)
+                                afrr_energy_details.append({
+                                    'interval': t,
+                                    'clearing_price': clearing_price,
+                                    'power': power,
+                                    'thermal_gained': thermal_via_afrr,
+                                    'cost': afrr_cost_per_mwh * power * Δt,
+                                    'gas_alternative': gas_alternative_cost,
+                                    'savings': savings_vs_gas
+                                })
+
+                        # Total aFRR contribution to savings
+                        afrr_energy_savings = sum([d['savings'] for d in afrr_energy_details])
+
+                        # For reporting, show it as positive contribution to savings
+                        afrr_energy_revenue = afrr_energy_savings  # This is what you want to show
+                        
+                        # Total cost includes DA, gas, and the aFRR energy cost, minus capacity revenue
+                        # Note: afrr_energy_revenue is now the savings, so we subtract it from costs
+                        afrr_energy_cost = sum([d['cost'] for d in afrr_energy_details]) if afrr_energy_details else 0
+                        reported_cash_flow_cost = elec_cost_da + gas_cost + afrr_energy_cost - daily_afrr_cap_revenue
                         savings = gas_baseline_daily - reported_cash_flow_cost
                         
                         elec_energy_da = sum([p_el_da[t].value() * Δt for t in range(len(prices))])
@@ -1039,24 +1065,30 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                             interval_hour, interval_min = divmod(t * 15, 60); time_str = f"{interval_hour:02d}:{interval_min:02d}:00"
                             gas_cost_interval_val = C_gas * (p_gas[t].value() / boiler_efficiency) * Δt
                             elec_cost_da_interval = (prices[t] + C_grid) * p_el_da[t].value() * Δt
-                            elec_cost_afrr_interval = (daily_clearing_prices[t] * p_el_afrr[t].value() * Δt) if daily_clearing_prices is not None else 0
+                            # Calculate aFRR cost for this interval (consistent with the detailed analysis above)
+                            afrr_net_cost_interval = 0
+                            if p_el_afrr[t].value() > 0.01:
+                                clearing_price = safe_float_convert(daily_clearing_prices[t]) if daily_clearing_prices is not None else 0.0
+                                afrr_net_cost_interval = (clearing_price + C_grid) * p_el_afrr[t].value() * Δt
+                            
                             total_elec_power = p_el_da[t].value() + p_el_afrr[t].value()
                             is_static_restricted = t in hochlast_intervals_static and not is_holiday
                             is_dynamic_restricted = (peak_restrictions_for_day is not None and len(peak_restrictions_for_day) > t and peak_restrictions_for_day[t] == 1 and not is_holiday)
                             is_restricted = is_static_restricted or is_dynamic_restricted
+                            
                             trade_record = {
                                 'date': day, 'time': time_str, 'interval': t, 'da_price': prices[t],
                                 'total_elec_cost': prices[t] + C_grid, 'p_el_heater': total_elec_power,
                                 'p_el_da': p_el_da[t].value(), 'p_el_afrr': p_el_afrr[t].value() if enable_afrr_energy else 0.0,
                                 'p_th_discharge': p_th[t].value(), 'p_gas_backup': p_gas[t].value(),
-                                'soc': soc[t].value(), 'elec_cost_interval': elec_cost_da_interval + elec_cost_afrr_interval,
+                                'soc': soc[t].value(), 'elec_cost_interval': elec_cost_da_interval + afrr_net_cost_interval,
                                 'gas_cost_interval': gas_cost_interval_val,
-                                'total_cost_interval': elec_cost_da_interval + elec_cost_afrr_interval + gas_cost_interval_val,
+                                'total_cost_interval': elec_cost_da_interval + afrr_net_cost_interval + gas_cost_interval_val,
                                 'is_hochlast': is_restricted, 'is_holiday': is_holiday,
                                 'is_charging': total_elec_power > 0.01, 'is_discharging': p_th[t].value() > 0.01,
                                 'using_gas': p_gas[t].value() > 0.01, 'demand_th': demand_profile[t],
                                 'is_in_afrr_market': (blocked_intervals_for_day[t] if t < len(blocked_intervals_for_day) else False) if enable_afrr_capacity else False,
-                                'afrr_energy_won': afrr_energy_won[t].value() if enable_afrr_energy else 0
+                                'afrr_energy_won': 1 if p_el_afrr[t].value() > 0.01 else 0 # Simplified win indicator
                             }
                             all_trades.append(trade_record)
                         
@@ -1072,11 +1104,11 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
 
                 progress_bar.progress(1.0); status_text.text("✅ Optimization completed!")
                 st.session_state['results'] = results; st.session_state['all_trades'] = all_trades
-                st.session_state['gas_baseline'] = np.mean(all_baselines) if all_baselines else 0
+                st.session_state['gas_baseline_total'] = sum(all_baselines) if all_baselines else 0
         except Exception as e: st.error(f"❌ An error occurred during optimization: {str(e)}"); st.stop()
 
         if 'results' in st.session_state and st.session_state['results']:
-            results, all_trades, gas_baseline = st.session_state['results'], st.session_state['all_trades'], st.session_state['gas_baseline']
+            results, all_trades, gas_baseline_total = st.session_state['results'], st.session_state['all_trades'], st.session_state['gas_baseline_total']
             results_df = pd.DataFrame(results); results_df['date'] = pd.to_datetime(results_df['day'])
             trades_df = pd.DataFrame(all_trades)
 
@@ -1084,40 +1116,43 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             with col1: st.header("📊 Results Summary")
             with col2:
                 if st.button("🗑️ Clear Results"):
-                    del st.session_state['results'], st.session_state['all_trades'], st.session_state['gas_baseline']
+                    del st.session_state['results'], st.session_state['all_trades'], st.session_state['gas_baseline_total']
                     st.rerun()
 
-            avg_savings = np.mean([r['savings'] for r in results])
+            # --- KPI Calculations ---
             total_savings = sum([r['savings'] for r in results])
-            avg_elec = np.mean([r['elec_energy'] for r in results])
-            avg_gas = np.mean([r['gas_energy'] for r in results])
-            savings_pct = (avg_savings / gas_baseline) * 100 if gas_baseline > 0 else 0
-            
             total_afrr_cap_revenue = sum([r.get('afrr_cap_revenue', 0) for r in results]) if enable_afrr_capacity else 0
             total_afrr_energy_revenue = sum([r.get('afrr_energy_revenue', 0) for r in results]) if enable_afrr_energy else 0
             total_afrr_revenue = total_afrr_cap_revenue + total_afrr_energy_revenue
+            
+            total_gas_only_price = gas_baseline_total
+            new_total_cost = total_gas_only_price - total_savings
+            savings_pct = (total_savings / total_gas_only_price) * 100 if total_gas_only_price > 0 else 0
 
-            kpi_cols = st.columns(4)
-            kpi_cols[0].metric("Days Analyzed", len(results))
-            kpi_cols[1].metric("Total Savings vs Gas Boiler", f"€{total_savings:,.0f}")
-            if enable_afrr_capacity or enable_afrr_energy:
-                kpi_cols[2].metric("Total aFRR Revenue", f"€{total_afrr_revenue:,.0f}")
-            else:
-                kpi_cols[2].metric("Total aFRR Revenue", "N/A (Disabled)")
-            kpi_cols[3].metric("Avg. Gas Baseline/Day", f"€{gas_baseline:,.0f}")
-
+            avg_savings = np.mean([r['savings'] for r in results])
+            avg_elec = np.mean([r['elec_energy'] for r in results])
+            avg_gas = np.mean([r['gas_energy'] for r in results])
             thermal_from_elec = avg_elec * η
             thermal_from_gas = avg_gas * boiler_efficiency
             total_thermal_delivered = thermal_from_elec + thermal_from_gas
             elec_percentage = (thermal_from_elec / total_thermal_delivered) * 100 if total_thermal_delivered > 0 else 0
-            gas_percentage = (thermal_from_gas / total_thermal_delivered) * 100 if total_thermal_delivered > 0 else 0
-            col1, col2 = st.columns(2)
-            with col1: st.metric("Thermal from Electricity", f"{elec_percentage:.1f}%")
-            with col2: st.metric("Thermal from Gas", f"{gas_percentage:.1f}%")
 
-            cost_gas_per_mwh_th = C_gas / boiler_efficiency
-            break_even_price = (cost_gas_per_mwh_th * η) - C_grid
-            st.info(f"**Break-even electricity price:** {break_even_price:.1f} €/MWh")
+            # --- Display KPIs ---
+            kpi_cols_1 = st.columns(4)
+            kpi_cols_1[0].metric("Days Analyzed", len(results))
+            kpi_cols_1[1].metric("Total Savings vs Gas Boiler", f"€{total_savings:,.0f}")
+            kpi_cols_1[2].metric("Total Gas Only Price", f"€{total_gas_only_price:,.0f}")
+            kpi_cols_1[3].metric("New Total Cost", f"€{new_total_cost:,.0f}")
+
+            kpi_cols_2 = st.columns(3)
+            kpi_cols_2[0].metric("Thermal from Electricity", f"{elec_percentage:.1f}%")
+            kpi_cols_2[2].metric("Savings", f"{savings_pct:.1f}%")
+            if enable_afrr_capacity or enable_afrr_energy:
+                kpi_cols_2[1].metric("Total aFRR Revenue", f"€{total_afrr_revenue:,.0f}")
+            else:
+                kpi_cols_2[1].metric("Total aFRR Revenue", "N/A (Disabled)")
+
+            #########
 
             best_day = max(results, key=lambda x: x['savings']); worst_day = min(results, key=lambda x: x['savings'])
             col1, col2 = st.columns(2)
@@ -1139,7 +1174,11 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             monthly_df['date'] = pd.to_datetime(monthly_df['day'])
             monthly_df['month'] = monthly_df['date'].dt.to_period('M').astype(str)
             
-            monthly_df['DA_Savings'] = monthly_df['gas_baseline_daily'] - (monthly_df['elec_cost_da'] + monthly_df['gas_cost'])
+            # --- CORRECTED ATTRIBUTION LOGIC ---
+            # Calculate the savings from the DA market as the total savings minus the direct aFRR contributions.
+            # This prevents double-counting the benefit of aFRR energy.
+            monthly_df['DA_Savings'] = monthly_df['savings'] - monthly_df['afrr_cap_revenue'] - monthly_df['afrr_energy_revenue']
+
 
             # Build columns for monthly summary based on enabled components
             summary_columns = ['DA_Savings']
@@ -1260,7 +1299,6 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         f"- Average Daily Savings: €{avg_savings:.2f} ({savings_pct:.1f}%)\n"
                         f"- Total Savings: €{total_savings:.2f}\n"
                         f"- Thermal Contribution from Electricity: {elec_percentage:.1f}%\n"
-                        f"- Break-even Price: {break_even_price:.1f} €/MWh\n"
                     )
 
                     if enable_afrr_capacity or enable_afrr_energy:
