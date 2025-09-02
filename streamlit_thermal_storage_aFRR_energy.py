@@ -826,7 +826,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         # Use a safe default of 0 if index is out of bounds
                         clearing_price = safe_float_convert(afrr_clearing_prices[t]) if t < len(afrr_clearing_prices) else 0.0
                         activation_frac = (safe_float_convert(afrr_activation_profile[t]) / 100.0) if t < len(afrr_activation_profile) else 0.0
-                        afrr_energy_revenues.append(-clearing_price * activation_frac * p_el_afrr[t] * Δt)
+                        afrr_energy_revenues.append(clearing_price * activation_frac * p_el_afrr[t] * Δt)
                     else:
                         afrr_energy_revenues.append(0)
                 
