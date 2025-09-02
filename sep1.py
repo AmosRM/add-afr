@@ -1142,11 +1142,10 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             kpi_cols_1[0].metric("Days Analyzed", len(results))
             kpi_cols_1[1].metric("Total Savings vs Gas Boiler", f"€{total_savings:,.0f}")
             kpi_cols_1[2].metric("Total Gas Only Price", f"€{total_gas_only_price:,.0f}")
-            kpi_cols_1[3].metric("New Total Cost", f"€{new_total_cost:,.0f}")
+            kpi_cols_1[3].metric("New Total Cost", f"€{new_total_cost:,.0f}",delta=f"{savings_pct:.1f}%")
 
             kpi_cols_2 = st.columns(3)
             kpi_cols_2[0].metric("Thermal from Electricity", f"{elec_percentage:.1f}%")
-            kpi_cols_2[2].metric("Savings", f"{savings_pct:.1f}%")
             if enable_afrr_capacity or enable_afrr_energy:
                 kpi_cols_2[1].metric("Total aFRR Revenue", f"€{total_afrr_revenue:,.0f}")
             else:
