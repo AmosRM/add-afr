@@ -9,7 +9,6 @@ from datetime import datetime, date
 import io
 import zipfile
 from ETL import etl_long_to_wide
-import math
 
 def safe_float_convert(value):
     """
@@ -44,7 +43,9 @@ st.set_page_config(
 # Title and description
 st.title("Thermal Storage Optimization System - DA & aFRR Markets")
 st.markdown("""
-This application optimizes thermal storage operations to minimize energy costs by:
+This application optimizes thermal storage operations with flexible objectives:
+- **Cost Minimization:** Traditional approach to minimize total energy costs
+- **Renewable Maximization:** Prioritize maximizing thermal energy from electricity (decarbonization focus)
 - **Day-Ahead Market:** Charging during low electricity prices and using stored energy during high prices.
 - **aFRR Market:** Committing capacity to the aFRR market using either a static or dynamic (ML-driven) bid strategy.
 - Considering grid charges, thermal demand, and market restrictions.
@@ -52,6 +53,9 @@ This application optimizes thermal storage operations to minimize energy costs b
 
 # Add helpful guidance
 st.info("👈 **Getting Started:** Use the sidebar to configure the optimization mode, data sources, and system parameters, then run the optimization below.")
+
+# Add note about new optimization objectives
+st.success("🎯 **New Feature:** Choose between cost minimization (traditional) or maximizing renewable thermal energy from electricity in the Economic & Bidding Parameters section!")
 
 @st.cache_data
 def precompute_afrr_auction(
@@ -399,8 +403,21 @@ with st.sidebar.expander("⚙️ Advanced System Parameters"):
         st.write(f"Power at 0% SOC: **{discharge_power_at_empty_pct}%**")
 
 with st.sidebar.expander("⚖️ Economic & Bidding Parameters"):
-    st.markdown("Set costs, prices, and strategic bid values.")
+    optimization_objective = st.radio(
+        "**Optimization Objective**",
+        ("Minimize Cost", "Maximize Thermal from Electricity")
+    )
+
+    price_cap_for_max_thermal = 150.0
+    if optimization_objective == "Maximize Thermal from Electricity":
+        price_cap_for_max_thermal = st.number_input(
+            "Max Charging Price (€/MWh)", 
+            value=150.0, min_value=0.0, step=5.0,
+            help="When maximizing thermal from electricity, avoid charging if DA price exceeds this value."
+        )
+    
     C_grid = st.number_input("Grid Charges (€/MWh)", value=30.0, min_value=0.0, max_value=100.0, step=1.0)
+
     C_gas = st.number_input("Gas Price (€/MWh)", value=65.0, min_value=10.0, max_value=200.0, step=1.0)
     terminal_value = st.number_input("Terminal Value (€/MWh)", value=65.0, min_value=10.0, max_value=200.0, step=1.0, help="Estimated value of energy remaining in storage at the end of the optimization period.")
     st.markdown("---")
@@ -801,13 +818,18 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             def build_da_only_model(prices, demand_profile, soc0, η_self, boiler_eff, 
                                     peak_restrictions=None, is_holiday=False, 
                                     afrr_commitment_mask=None,
-                                    enable_curve=False, curve_params=None, da_capacity_limit=None):
+                                    enable_curve=False, curve_params=None, da_capacity_limit=None,
+                                    optimization_objective="Minimize Cost", price_cap=150.0):
                 """
                 Builds the PuLP model for Day-Ahead optimization only.
                 This model is blind to the aFRR energy market.
                 """
                 T = len(prices)
-                model = LpProblem("DA_Only_Storage_Optimization", LpMinimize)
+                
+                if optimization_objective == "Minimize Cost":
+                    model = LpProblem("DA_Cost_Minimization", LpMinimize)
+                else:  # Maximize Thermal from Electricity
+                    model = LpProblem("DA_Maximize_Electric_Thermal", LpMaximize)
                 da_cap = da_capacity_limit if da_capacity_limit is not None else Pmax_el
 
                 
@@ -825,10 +847,27 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         model += p_el_da[t+3] == p_el_da[t], f"HourlyPower_DA_H{hour_idx}_Int3"
                
                 # Objective function
-                da_costs = lpSum([(prices[t] + C_grid) * p_el_da[t] * Δt for t in range(T)])
-                gas_costs = lpSum([(C_gas / boiler_eff) * p_gas[t] * Δt for t in range(T)])
-                
-                model += da_costs + gas_costs - terminal_value * soc[T-1]
+                if optimization_objective == "Minimize Cost":
+                    # EXISTING: Minimize costs
+                    da_costs = lpSum([(prices[t] + C_grid) * p_el_da[t] * Δt for t in range(T)])
+                    gas_costs = lpSum([(C_gas / boiler_eff) * p_gas[t] * Δt for t in range(T)])
+                    model += da_costs + gas_costs - terminal_value * soc[T-1]
+                else:
+                    # NEW: Maximize thermal energy from electricity
+                    total_electric_thermal = lpSum([p_th[t] * Δt for t in range(T)])
+                    
+                    # Add a smarter cost penalty to break ties and avoid high prices
+                    cost_penalty = 0
+                    for t in range(T):
+                        # Use a very high penalty if price exceeds the cap
+                        if prices[t] > price_cap:
+                            penalty_multiplier = 10000.0 # A large number to make charging extremely unattractive
+                        else:
+                            penalty_multiplier = 0.001 # The original small penalty
+                        
+                        cost_penalty += penalty_multiplier * (prices[t] + C_grid) * p_el_da[t] * Δt
+
+                    model += total_electric_thermal - cost_penalty
                 
                 # Power curve parameters
                 if enable_curve and curve_params is not None:
@@ -868,6 +907,9 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     
                     if is_da_restricted:
                         model += p_el_da[t] == 0
+
+                    if optimization_objective == "Maximize Thermal from Electricity" and prices[t] > price_cap:
+                        model += p_el_da[t] == 0, f"Price_Cap_Restriction_{t}"
                     
                     # Apply power curves if enabled
                     if enable_curve and curve_params is not None:
@@ -1047,7 +1089,9 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     model, p_el_da_vars, p_th_vars, p_gas_vars, soc_vars = build_da_only_model(
                         prices, demand_profile, soc0, η_self, boiler_efficiency,
                         peak_restrictions_for_day, is_holiday, blocked_intervals_for_day,
-                        enable_curve=enable_power_curve, curve_params=curve_params, da_capacity_limit=da_max_capacity  
+                        enable_curve=enable_power_curve, curve_params=curve_params, da_capacity_limit=da_max_capacity,
+                        optimization_objective=optimization_objective,
+                        price_cap=price_cap_for_max_thermal
                     )
                     status = model.solve(PULP_CBC_CMD(msg=False))
 
@@ -1196,12 +1240,23 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             # --- Display KPIs ---
             kpi_cols_1 = st.columns(4)
             kpi_cols_1[0].metric("Days Analyzed", len(results))
-            kpi_cols_1[1].metric("Total Savings vs Gas Boiler", f"€{total_savings:,.0f}")
+            
+            # Show consistent metrics with highlighting based on optimization objective
+            if optimization_objective == "Minimize Cost":
+                kpi_cols_1[1].metric("Total Savings vs Gas Boiler", f"€{total_savings:,.0f}", 
+                                    delta="PRIMARY OBJECTIVE")
+            else:
+                kpi_cols_1[1].metric("Total Savings vs Gas Boiler", f"€{total_savings:,.0f}")
+            
             kpi_cols_1[2].metric("Total Gas Only Price", f"€{total_gas_only_price:,.0f}")
             kpi_cols_1[3].metric("New Total Cost", f"€{new_total_cost:,.0f}",delta=f"{savings_pct:.1f}%")
-
+            
             kpi_cols_2 = st.columns(3)
-            kpi_cols_2[0].metric("Thermal Demand from Electricity", f"{elec_percentage:.1f}%")
+            if optimization_objective == "Maximize Thermal from Electricity":
+                kpi_cols_2[0].metric("Thermal from Electricity", f"{elec_percentage:.1f}%", 
+                                    delta="PRIMARY OBJECTIVE")
+            else:
+                kpi_cols_2[0].metric("Thermal from Electricity", f"{elec_percentage:.1f}%")
             if enable_afrr_capacity or enable_afrr_energy:
                 kpi_cols_2[1].metric("Total aFRR Revenue", f"€{total_afrr_revenue:,.0f}")
             else:
