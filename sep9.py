@@ -42,17 +42,20 @@ st.set_page_config(
 
 # Title and description
 st.title("Thermal Storage Optimization System - DA & aFRR Markets")
-st.markdown("""
-This application optimizes thermal storage operations with flexible objectives:
-- **Cost Minimization:** Traditional approach to minimize total energy costs
-- **Renewable Maximization:** Prioritize maximizing thermal energy from electricity (decarbonization focus)
-- **Day-Ahead Market:** Charging during low electricity prices and using stored energy during high prices.
-- **aFRR Market:** Committing capacity to the aFRR market using either a static or dynamic (ML-driven) bid strategy.
-- Considering grid charges, thermal demand, and market restrictions.
-""")
 
-# Add helpful guidance
-st.info("👈 **Getting Started:** Use the sidebar to configure the optimization mode, data sources, and system parameters, then run the optimization below.")
+# Only show description and guidance when optimization hasn't started
+if not st.session_state.get('run_clicked', False):
+    st.markdown("""
+    This application optimizes thermal storage operations with flexible objectives:
+    - **Cost Minimization:** Traditional approach to minimize total energy costs
+    - **Renewable Maximization:** Prioritize maximizing thermal energy from electricity (decarbonization focus)
+    - **Day-Ahead Market:** Charging during low electricity prices and using stored energy during high prices.
+    - **aFRR Market:** Committing capacity to the aFRR market using either a static or dynamic (ML-driven) bid strategy.
+    - Considering grid charges, thermal demand, and market restrictions.
+    """)
+
+    # Add helpful guidance
+    st.info("👈 **Getting Started:** Use the sidebar to configure the optimization mode, data sources, and system parameters, then run the optimization below.")
 
 @st.cache_data
 def precompute_afrr_auction(
@@ -584,12 +587,14 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
 
     if 'cached_config_key' in st.session_state and 'cached_df_price' in st.session_state and st.session_state['cached_config_key'] == config_key:
         df_price = st.session_state['cached_df_price']
-        st.success("✅ Using cached price data from previous fetch!")
+        if not st.session_state.get('run_clicked', False):
+            st.success("✅ Using cached price data from previous fetch!")
     else:
         # ... (rest of price data loading logic remains the same)
         df_price = None
         if transform_data:
-            st.info("New data source detected. Running ETL transformation...")
+            if not st.session_state.get('run_clicked', False):
+                st.info("New data source detected. Running ETL transformation...")
             with st.spinner("Transforming data from long to wide format..."):
                 try:
                     if uploaded_file is not None:
@@ -598,7 +603,8 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         df_price = etl_long_to_wide(use_api=True, api_config=api_config)
                     elif use_builtin_data:
                         df_price = etl_long_to_wide(input_source="idprices-epex2024.csv", datetime_column_name='Date (CET)', value_column_name='Day Ahead Price')
-                    st.success("✅ Price ETL transformation successful!")
+                    if not st.session_state.get('run_clicked', False):
+                        st.success("✅ Price ETL transformation successful!")
                     if df_price is not None:
                         st.session_state['cached_df_price'] = df_price.copy()
                         st.session_state['cached_config_key'] = config_key
@@ -622,12 +628,14 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
         demand_config_key = f"demand_{demand_file.name}_{hash(demand_file.getvalue())}"
         if 'cached_demand_config_key' in st.session_state and 'cached_df_demand' in st.session_state and st.session_state['cached_demand_config_key'] == demand_config_key:
             df_demand = st.session_state['cached_df_demand']
-            st.success("✅ Using cached demand data!")
+            if not st.session_state.get('run_clicked', False):
+                st.success("✅ Using cached demand data!")
         else:
             with st.spinner("Transforming demand data..."):
                 try:
                     df_demand = etl_long_to_wide(input_source=demand_file, datetime_column_name='Date (CET)', value_column_name='MW-th')
-                    st.success("✅ Demand ETL transformation successful!")
+                    if not st.session_state.get('run_clicked', False):
+                        st.success("✅ Demand ETL transformation successful!")
                     st.session_state['cached_df_demand'] = df_demand.copy()
                     st.session_state['cached_demand_config_key'] = demand_config_key
                 except Exception as e: st.error(f"❌ Demand file processing failed: {e}"); st.stop()
@@ -637,12 +645,14 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
         peak_config_key = "peak_builtin_example"
         if 'cached_peak_config_key' in st.session_state and 'cached_df_peak' in st.session_state and st.session_state['cached_peak_config_key'] == peak_config_key:
             df_peak = st.session_state['cached_df_peak']
-            st.success("✅ Using cached built-in peak restriction data!")
+            if not st.session_state.get('run_clicked', False):
+                st.success("✅ Using cached built-in peak restriction data!")
         else:
             with st.spinner("Loading built-in peak restriction example data..."):
                 try:
                     df_peak = etl_long_to_wide(input_source="Example_Peak Restriktions.csv", datetime_column_name='Date (CET)', value_column_name='Is HLF')
-                    st.success("✅ Built-in peak restriction data loaded successfully!")
+                    if not st.session_state.get('run_clicked', False):
+                        st.success("✅ Built-in peak restriction data loaded successfully!")
                     st.session_state['cached_df_peak'] = df_peak.copy()
                     st.session_state['cached_peak_config_key'] = peak_config_key
                 except Exception as e:
@@ -653,7 +663,8 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
         peak_config_key = f"peak_{peak_period_file.name}_{hash(peak_period_file.getvalue())}"
         if 'cached_peak_config_key' in st.session_state and 'cached_df_peak' in st.session_state and st.session_state['cached_peak_config_key'] == peak_config_key:
             df_peak = st.session_state['cached_df_peak']
-            st.success("✅ Using cached peak restriction data!")
+            if not st.session_state.get('run_clicked', False):
+                st.success("✅ Using cached peak restriction data!")
         else:
             with st.spinner("Analyzing peak restriction file..."):
                 try:
@@ -665,7 +676,8 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     if header_row_index == -1: st.error("❌ Invalid Peak Restriction File: Could not find 'Date (CET)' and 'Is HLF' columns."); st.stop()
                     clean_csv_in_memory = io.StringIO('\n'.join(lines[header_row_index:]))
                     df_peak = etl_long_to_wide(input_source=clean_csv_in_memory, datetime_column_name='Date (CET)', value_column_name='Is HLF')
-                    st.success("✅ Peak restriction data cleaned and ETL successful!")
+                    if not st.session_state.get('run_clicked', False):
+                        st.success("✅ Peak restriction data cleaned and ETL successful!")
                     st.session_state['cached_df_peak'] = df_peak.copy()
                     st.session_state['cached_peak_config_key'] = peak_config_key
                 except Exception as e: st.error(f"❌ A critical error occurred while processing the peak restriction file: {e}"); st.stop()
@@ -681,7 +693,8 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             capacity_config_key = "afrr_capacity_builtin"
             if 'cached_afrr_capacity_config_key' in st.session_state and st.session_state.get('cached_afrr_capacity_config_key') == capacity_config_key:
                 df_afrr_capacity = st.session_state.get('cached_df_afrr_capacity')
-                st.success("✅ Using cached aFRR capacity data!")
+                if not st.session_state.get('run_clicked', False):
+                    st.success("✅ Using cached aFRR capacity data!")
             else:
                 try:
                     df_afrr_capacity = pd.read_csv("aFRRprices.csv")
@@ -689,7 +702,8 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     df_afrr_capacity = df_afrr_capacity.set_index('datetime')
                     st.session_state['cached_df_afrr_capacity'] = df_afrr_capacity.copy()
                     st.session_state['cached_afrr_capacity_config_key'] = capacity_config_key
-                    st.success("✅ Built-in aFRR capacity data loaded!")
+                    if not st.session_state.get('run_clicked', False):
+                        st.success("✅ Built-in aFRR capacity data loaded!")
                 except Exception as e: st.error(f"❌ Failed to load built-in aFRRprices.csv: {e}")
         elif afrr_capacity_file:
             capacity_config_key = f"afrr_capacity_{afrr_capacity_file.name}_{hash(afrr_capacity_file.getvalue())}"
@@ -698,7 +712,8 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 df_afrr_capacity = pd.read_csv(afrr_capacity_file)
                 df_afrr_capacity['datetime'] = pd.to_datetime(df_afrr_capacity['Date (CET)'])
                 df_afrr_capacity = df_afrr_capacity.set_index('datetime')
-                st.success("✅ aFRR capacity data loaded!")
+                if not st.session_state.get('run_clicked', False):
+                    st.success("✅ aFRR capacity data loaded!")
             except Exception as e: st.error(f"❌ Failed to process aFRR capacity file: {e}")
         else:
             st.warning("Please provide aFRR Capacity Auction data.")
@@ -709,20 +724,23 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             energy_config_key = "afrr_energy_builtin"
             if 'cached_afrr_energy_config_key' in st.session_state and st.session_state.get('cached_afrr_energy_config_key') == energy_config_key:
                 df_afrr_energy = st.session_state.get('cached_df_afrr_energy')
-                st.success("✅ Using cached aFRR energy data!")
+                if not st.session_state.get('run_clicked', False):
+                    st.success("✅ Using cached aFRR energy data!")
             else:
                 try:
                     df_afrr_energy = pd.read_csv("aFRRenergylight.csv")
                     st.session_state['cached_df_afrr_energy'] = df_afrr_energy.copy()
                     st.session_state['cached_afrr_energy_config_key'] = energy_config_key
-                    st.success("✅ Built-in aFRR energy data loaded!")
+                    if not st.session_state.get('run_clicked', False):
+                        st.success("✅ Built-in aFRR energy data loaded!")
                 except Exception as e: st.error(f"❌ Failed to load built-in aFRRenergylight.csv: {e}")
         elif afrr_energy_file:
             energy_config_key = f"afrr_energy_{afrr_energy_file.name}_{hash(afrr_energy_file.getvalue())}"
             # ... caching logic for uploaded energy file ...
             try:
                 df_afrr_energy = pd.read_csv(afrr_energy_file)
-                st.success("✅ aFRR energy data loaded!")
+                if not st.session_state.get('run_clicked', False):
+                    st.success("✅ aFRR energy data loaded!")
             except Exception as e: st.error(f"❌ Failed to process aFRR energy file: {e}")
         else:
             st.warning("Please provide aFRR Energy Market data.")
@@ -760,48 +778,54 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 hlf_time_cols = [col for col in df_processed.columns if col.endswith('_hlf')]
                 if hlf_time_cols: df_processed[hlf_time_cols] = df_processed[hlf_time_cols].fillna(0)
             else: hlf_time_cols = []
-            st.success(f"✅ Ready to analyze {len(df_processed)} days of data.")
+            if not st.session_state.get('run_clicked', False):
+                st.success(f"✅ Ready to analyze {len(df_processed)} days of data.")
             with st.spinner("Cleaning data..."):
                 for col in df_processed.columns:
                     if col != 'date': df_processed[col] = df_processed[col].replace([np.inf, -np.inf], np.nan).interpolate(method='linear', limit_direction='both').fillna(df_processed[col].median())
-            st.success("✅ Data cleaning completed")
+            if not st.session_state.get('run_clicked', False):
+                st.success("✅ Data cleaning completed")
 
-            afrr_15min_mask, afrr_won_blocks = None, None
+            # --- Pre-computation happens here, but UI feedback is conditional ---
+            afrr_won_blocks, afrr_15min_mask = None, None
             if optimization_mode == "DA + aFRR Market" and enable_afrr_capacity and df_afrr_capacity is not None:
-                st.header("⚡ aFRR Capacity Auction Pre-computation")
-                with st.spinner("Analyzing aFRR capacity bids (using cache if available)..."):
-                    afrr_won_blocks, afrr_15min_mask = precompute_afrr_auction(
-                        _df_afrr_capacity=df_afrr_capacity, afrr_bid_strategy=afrr_bid_strategy,
-                        static_bid_price=afrr_bid_price, _df_afrr_bids=df_afrr_bids,
-                        _df_peak=df_peak, holiday_set=holiday_set,
-                        static_hochlast_intervals=hochlast_intervals_static, bid_mw=afrr_bid_mw
-                    )
-                    
-                if afrr_won_blocks is not None and not afrr_won_blocks.empty:
-                    st.success(f"✅ Pre-computation complete. Found {len(afrr_won_blocks)} won aFRR blocks.")
-                elif afrr_won_blocks is not None:
-                     st.success("✅ Pre-computation complete. No aFRR blocks were won.")
-                else:
-                    st.warning("⚠️ Could not perform aFRR pre-computation. Check aFRR capacity data sources.")
+                afrr_won_blocks, afrr_15min_mask = precompute_afrr_auction(
+                    _df_afrr_capacity=df_afrr_capacity, afrr_bid_strategy=afrr_bid_strategy,
+                    static_bid_price=afrr_bid_price, _df_afrr_bids=df_afrr_bids,
+                    _df_peak=df_peak, holiday_set=holiday_set,
+                    static_hochlast_intervals=hochlast_intervals_static, bid_mw=afrr_bid_mw
+                )
 
             afrr_clearing_prices_series = None
             afrr_activation_profile_series = None
-            
             if optimization_mode == "DA + aFRR Market" and enable_afrr_energy and df_afrr_energy is not None:
-                st.header("⚡ aFRR Energy Market Analysis")
-                with st.spinner("Extracting aFRR energy prices and activation profile..."):
-                    afrr_clearing_prices_series = extract_afrr_clearing_prices(df_afrr_energy)
-                    afrr_activation_profile_series = extract_afrr_activation_profile(df_afrr_energy)
+                afrr_clearing_prices_series = extract_afrr_clearing_prices(df_afrr_energy)
+                afrr_activation_profile_series = extract_afrr_activation_profile(df_afrr_energy)
+
+            # --- Conditionally display the pre-run info ---
+            if not st.session_state.get('run_clicked', False):
+                pre_run_container = st.container()
+                with pre_run_container:
+                    if optimization_mode == "DA + aFRR Market" and enable_afrr_capacity:
+                        st.header("⚡ aFRR Capacity Auction Pre-computation")
+                        if afrr_won_blocks is not None and not afrr_won_blocks.empty:
+                            st.success(f"✅ Pre-computation complete. Found {len(afrr_won_blocks)} won aFRR blocks.")
+                        elif afrr_won_blocks is not None:
+                            st.info("ℹ️ Pre-computation complete. No aFRR blocks were won based on the current bid strategy.")
+                        else:
+                            st.warning("⚠️ Could not perform aFRR pre-computation. Check aFRR capacity data sources.")
                     
-                    if afrr_clearing_prices_series is not None:
-                        st.success(f"✅ Extracted {len(afrr_clearing_prices_series)} clearing price points")
-                    
-                    if afrr_activation_profile_series is not None:
-                        st.success(f"✅ Extracted {len(afrr_activation_profile_series)} activation profile points")
-                        avg_activation = afrr_activation_profile_series.mean()
-                        st.info(f"📊 Average activation rate: {avg_activation:.1f}%")
-                    else:
-                        st.info("📊 Using default 100% activation profile")
+                    if optimization_mode == "DA + aFRR Market" and enable_afrr_energy:
+                        st.header("⚡ aFRR Energy Market Analysis")
+                        if afrr_clearing_prices_series is not None:
+                            st.success(f"✅ Extracted {len(afrr_clearing_prices_series)} aFRR energy clearing price points.")
+                        
+                        if afrr_activation_profile_series is not None:
+                            st.success(f"✅ Extracted {len(afrr_activation_profile_series)} activation profile points.")
+                            avg_activation = afrr_activation_profile_series.mean()
+                            st.info(f"📊 Average activation rate: {avg_activation:.1f}%")
+                        else:
+                            st.info("📊 Using default 100% activation profile as no activation data was found.")
 
             if df_demand is not None:
                 price_time_cols = [col for col in df_processed.columns if col.endswith('_price')]
@@ -1005,9 +1029,20 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     "savings_vs_gas": savings_vs_gas
                 }
 
+            η_self = (1 - self_discharge_daily / 100) ** (Δt / 24)
+            
+            curve_params = None
+            if enable_power_curve:
+                curve_params = {
+                    'charge_start_pct': charge_taper_soc_pct,
+                    'charge_end_pct': charge_power_at_full_pct,
+                    'discharge_start_pct': discharge_taper_soc_pct,
+                    'discharge_end_pct': discharge_power_at_empty_pct
+                }
 
 
             if st.button("🚀 Run Optimization", type="primary"):
+                st.session_state.run_clicked = True  # Set flag to hide pre-run UI
                 if 'results' in st.session_state: del st.session_state['results']
                 if 'all_trades' in st.session_state: del st.session_state['all_trades']
                 if 'gas_baseline' in st.session_state: del st.session_state['gas_baseline']
@@ -1015,16 +1050,6 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 progress_bar = st.progress(0); status_text = st.empty()
                 soc0 = float(SOC_min)
                 results, all_trades, all_baselines = [], [], []
-                η_self = (1 - self_discharge_daily / 100) ** (Δt / 24)
-                
-                curve_params = None
-                if enable_power_curve:
-                    curve_params = {
-                        'charge_start_pct': charge_taper_soc_pct,
-                        'charge_end_pct': charge_power_at_full_pct,
-                        'discharge_start_pct': discharge_taper_soc_pct,
-                        'discharge_end_pct': discharge_power_at_empty_pct
-                    }
 
                 for idx, (_, row) in enumerate(df_processed.iterrows()):
                     progress_bar.progress((idx + 1) / len(df_processed))
@@ -1203,10 +1228,11 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             trades_df = pd.DataFrame(all_trades)
 
             col1, col2 = st.columns([3, 1])
-            with col1: st.header("📊 Results Summary")
+            with col1: st.header("Results Summary")
             with col2:
                 if st.button("🗑️ Clear Results"):
                     del st.session_state['results'], st.session_state['all_trades'], st.session_state['gas_baseline_total']
+                    st.session_state.run_clicked = False  # Reset flag to show pre-run info again
                     st.rerun()
 
             # --- KPI Calculations ---
@@ -1265,7 +1291,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             with col1: st.success(f"**Best day:** {best_day['day']} (€{best_day['savings']:.2f} saved)")
             with col2: st.warning(f"**Worst day:** {worst_day['day']} (€{worst_day['savings']:.2f} saved)")
 
-            st.header("📈 Visualizations")
+            
             fig1 = px.line(results_df, x='date', y='savings', title='Daily Savings Over Time', labels={'savings': 'Savings (€)', 'date': 'Date'})
             fig1.add_hline(y=avg_savings, line_dash="dash", annotation_text=f"Average: €{avg_savings:.2f}")
             st.plotly_chart(fig1, use_container_width=True)
@@ -1307,6 +1333,165 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             fig_monthly = px.bar(monthly_summary, x='month', y=y_columns, title='Monthly Revenue & Savings Stack', height=500)
             fig_monthly.update_layout(xaxis_title='Month', yaxis_title='Total Value (€)', legend_title='Revenue Stream')
             st.plotly_chart(fig_monthly, use_container_width=True)
+            
+            if optimization_objective == "Maximize Thermal from Electricity":
+                st.header("Breakeven Analysis")
+                st.markdown("""
+                This analysis determines the maximum Day-Ahead (DA) price at which charging the storage is still cheaper than using the gas boiler, **considering revenues from ancillary services (aFRR)**.
+                """)
+
+                # SMART ESTIMATE BASED ON INITIAL SIMULATION RESULTS
+                st.subheader("Quick Estimate (Based on Last Run)")
+                
+                try:
+                    # Calculate total DA energy and aFRR revenues from the completed simulation
+                    total_elec_energy_da = trades_df['p_el_da'].sum() * Δt
+                    total_afrr_revenue = results_df['afrr_cap_revenue'].sum() + results_df['afrr_energy_revenue'].sum()
+
+                    if total_elec_energy_da > 0.01:
+                        avg_afrr_subsidy = total_afrr_revenue / total_elec_energy_da
+                    else:
+                        avg_afrr_subsidy = 0
+
+                    # The effective cost of producing 1 MWh of thermal energy from gas
+                    cost_th_from_gas = C_gas / boiler_efficiency
+                    
+                    # The breakeven DA price, now including the aFRR subsidy
+                    breakeven_price_analytical = (cost_th_from_gas * η) + avg_afrr_subsidy
+
+                    st.metric(
+                        label="Estimated Breakeven DA Price",
+                        value=f"€{breakeven_price_analytical:.2f} / MWh",
+                        help="This smart estimate includes the average aFRR revenue as a 'subsidy' to the electricity cost, based on the simulation you just ran."
+                    )
+                    
+                    with st.expander("See Calculation Details"):
+                        st.write(f"- Cost of Thermal from Gas: `€{C_gas:.2f} / {boiler_efficiency:.2f} = €{cost_th_from_gas:.2f} / MWh_th`")
+                        st.write(f"- Total aFRR Revenue from Run: `€{total_afrr_revenue:,.2f}`")
+                        st.write(f"- Total DA Charging from Run: `{total_elec_energy_da:,.2f} MWh`")
+                        st.write(f"- Average aFRR Subsidy: `€{total_afrr_revenue:,.2f} / {total_elec_energy_da:,.2f} MWh = €{avg_afrr_subsidy:.2f} / MWh`")
+                        st.write(f"- Breakeven Formula: `(Gas_Cost_th * η) + Subsidy`")
+                        st.write(f"- Result: `(€{cost_th_from_gas:.2f} * {η:.2f}) + €{avg_afrr_subsidy:.2f} = €{breakeven_price_analytical:.2f}`")
+
+                except (ZeroDivisionError, KeyError) as e:
+                    st.warning("Could not calculate a smart estimate. Run the main optimization first or check results.")
+                    breakeven_price_analytical = 100 # Fallback for simulation
+
+                # --- 2. PRECISE SIMULATION (IMPROVED) ---
+                with st.expander("📈 Precise Result (Full Simulation)", expanded=False):
+                    st.markdown("""
+                    Click below to run an iterative simulation that accounts for all dynamics to find the precise breakeven price. This is computationally intensive.
+                    """)
+
+                    # This helper function remains the same as it is the "gold standard"
+                    memo = {} 
+                    def run_simulation_for_price(price_cap):
+                        if price_cap in memo:
+                            return memo[price_cap]
+
+                        local_soc0 = float(SOC_min)
+                        daily_results = []
+                        
+                        for _, row in df_processed.iterrows():
+                            day = row['date']
+                            prices = row[price_time_cols].values
+                            demand_profile = np.full(len(prices), D_th) if demand_option == 'Constant Demand' else row[demand_time_cols].values
+                            T = len(prices)
+                            
+                            daily_afrr_cap_revenue = 0
+                            blocked_intervals_for_day = [False] * T
+                            if optimization_mode == 'DA + aFRR Market' and afrr_15min_mask is not None:
+                                day_dt = pd.to_datetime(day).tz_localize(None)
+                                day_start = day_dt.replace(hour=0, minute=0)
+                                day_end = day_start + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+                                try:
+                                    daily_mask = afrr_15min_mask[(afrr_15min_mask.index >= day_start) & (afrr_15min_mask.index <= day_end)]
+                                    if not daily_mask.empty:
+                                        mask_values = daily_mask.values; num_to_copy = min(len(mask_values), T)
+                                        blocked_intervals_for_day[:num_to_copy] = [bool(x) for x in mask_values[:num_to_copy]]
+                                except Exception: pass
+                                if afrr_won_blocks is not None:
+                                    daily_won_blocks = afrr_won_blocks[(afrr_won_blocks.index >= day_start) & (afrr_won_blocks.index < day_end)]
+                                    daily_afrr_cap_revenue = daily_won_blocks["cap_payment"].sum()
+
+                            gas_baseline_daily = (sum(demand_profile) * Δt * C_gas) / boiler_efficiency
+                            is_holiday = day in holiday_set
+                            peak_restrictions_for_day = row[hlf_time_cols].values if (df_peak is not None and hlf_time_cols) else None
+                            
+                            daily_clearing_prices = np.zeros(T)
+                            if afrr_clearing_prices_series is not None:
+                                day_dt = pd.to_datetime(day).tz_localize(None); day_start = day_dt; day_end = day_start + pd.Timedelta(days=1) - pd.Timedelta(minutes=1)
+                                daily_prices_series = afrr_clearing_prices_series[(afrr_clearing_prices_series.index >= day_start) & (afrr_clearing_prices_series.index <= day_end)]
+                                if not daily_prices_series.empty:
+                                    source_data = daily_prices_series.values; num_to_copy = min(T, len(source_data))
+                                    daily_clearing_prices[:num_to_copy] = source_data[:num_to_copy]
+                            
+                            daily_afrr_activation_profile = np.full(T, 100.0)
+                            if afrr_activation_profile_series is not None:
+                                day_dt = pd.to_datetime(day).tz_localize(None); day_start = day_dt; day_end = day_start + pd.Timedelta(days=1) - pd.Timedelta(minutes=1)
+                                daily_activation_series = afrr_activation_profile_series[(afrr_activation_profile_series.index >= day_start) & (afrr_activation_profile_series.index <= day_end)]
+                                if not daily_activation_series.empty:
+                                   source_data = daily_activation_series.values; num_to_copy = min(T, len(source_data))
+                                   daily_afrr_activation_profile[:num_to_copy] = source_data[:num_to_copy]
+
+                            model, p_el_da_vars, p_th_vars, p_gas_vars, soc_vars = build_da_only_model(
+                                prices, demand_profile, local_soc0, η_self, boiler_efficiency,
+                                peak_restrictions_for_day, is_holiday, blocked_intervals_for_day,
+                                enable_curve=enable_power_curve, curve_params=curve_params, da_capacity_limit=da_max_capacity,
+                                optimization_objective="Maximize Thermal from Electricity", price_cap=price_cap
+                            )
+                            status = model.solve(PULP_CBC_CMD(msg=False))
+
+                            if status == 1:
+                                da_plan = {'p_el_da': [v.value() for v in p_el_da_vars.values()], 'p_th': [v.value() for v in p_th_vars.values()], 'p_gas': [v.value() for v in p_gas_vars.values()]}
+                                if optimization_mode == "DA + aFRR Market" and enable_afrr_energy:
+                                    sim_results = simulate_afrr_energy(da_plan, local_soc0, daily_clearing_prices, daily_afrr_activation_profile, η_self)
+                                    final_soc, afrr_energy_net_cost = sim_results['final_soc_trajectory'][-1], sim_results['net_cost']
+                                else:
+                                    final_soc, afrr_energy_net_cost = soc_vars[T-1].value(), 0.0
+                                elec_cost_da = sum((prices[t] + C_grid) * da_plan['p_el_da'][t] * Δt for t in range(T))
+                                gas_cost = sum(C_gas * (da_plan['p_gas'][t] / boiler_efficiency) * Δt for t in range(T))
+                                reported_cash_flow_cost = elec_cost_da + gas_cost + afrr_energy_net_cost - daily_afrr_cap_revenue
+                                savings = gas_baseline_daily - reported_cash_flow_cost
+                                daily_results.append({"savings": savings, "soc_end": final_soc})
+                                local_soc0 = final_soc
+                            else:
+                                daily_results.append({"savings": 0, "soc_end": local_soc0})
+
+                        total_savings_for_run = sum(r['savings'] for r in daily_results)
+                        memo[price_cap] = total_savings_for_run
+                        return total_savings_for_run
+
+                    if st.button("📈 Run Precise Breakeven Simulation"):
+                        with st.spinner("Finding precise breakeven price... This may take several minutes."):
+                            low_price = max(0, breakeven_price_analytical - 15)
+                            high_price = breakeven_price_analytical + 15
+                            best_breakeven_price = None
+                            
+                            savings_at_high = run_simulation_for_price(high_price)
+                            if savings_at_high > 0:
+                                st.warning(f"The system is still profitable at €{high_price:0f}/MWh (Savings: €{savings_at_high:,.0f}). The true breakeven point is higher.")
+                                best_breakeven_price = high_price
+                            else:
+                                for i in range(5): # 5 iterations on a smaller range is plenty
+                                    mid_price = (low_price + high_price) / 2
+                                    savings = run_simulation_for_price(mid_price)
+                                    if savings >= 0:
+                                        low_price = mid_price
+                                        best_breakeven_price = mid_price
+                                    else:
+                                        high_price = mid_price
+                                
+                            if best_breakeven_price is not None:
+                                final_savings = run_simulation_for_price(best_breakeven_price)
+                                st.metric(
+                                    label="Simulated Breakeven DA Price",
+                                    value=f"€{best_breakeven_price:.1f} / MWh",
+                                    delta=f"~€{best_breakeven_price - breakeven_price_analytical:.1f} vs. estimate",
+                                    help=f"The full simulation finds this price cap results in total savings of ~€{final_savings:,.0f}."
+                                )
+                            else:
+                                st.error("Could not find a breakeven point. It's likely unprofitable even at a zero charging price.")
 
             st.header("Sample Period Analysis")
             with st.expander("🔍 Detailed Period Analysis"):
