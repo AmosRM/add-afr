@@ -948,32 +948,69 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 
                 return model, p_el_da, p_th, p_gas, soc
 
-            def simulate_afrr_energy(da_plan, soc0, daily_clearing_prices, daily_activation_profile, η_self):
+            def simulate_afrr_energy(da_plan, soc0, daily_clearing_prices, daily_activation_profile, η_self, 
+                                     enable_curve=False, curve_params=None, Pmax_el=2.0, Smax=8.0, 
+                                     SOC_min=0.0, η=0.95, Δt=0.25, C_grid=30.0, C_gas=65.0, 
+                                     boiler_efficiency=0.9, soc_premium_table=None, 
+                                     afrr_energy_bid_base=36.0):
                 """
                 Simulates aFRR energy market participation on top of a fixed DA plan.
-                This is a rule-based simulation, not an optimization.
-                It now incorporates the constraint that aFRR energy bids must be in integer MW values.
+                Now properly implements power curve constraints.
                 """
                 T = len(da_plan['p_el_da'])
                 p_el_afrr = [0.0] * T
                 final_soc_trajectory = [0.0] * T
-                
+
                 net_cost = 0.0
                 savings_vs_gas = 0.0
-                
+
                 current_soc = soc0
-                
+
+                # Setup power curve parameters if enabled
+                max_charge_power = Pmax_el
+                if enable_curve and curve_params is not None:
+                    s_cut_charge_frac = curve_params['charge_start_pct'] / 100.0
+                    p_min_charge_frac = curve_params['charge_end_pct'] / 100.0
+                    soc_charge_knee = s_cut_charge_frac * Smax
+
+                    if (Smax - soc_charge_knee) > 1e-6:
+                        power_at_full = p_min_charge_frac * Pmax_el
+                        m_charge = (power_at_full - Pmax_el) / (Smax - soc_charge_knee)
+                        b_charge = Pmax_el - m_charge * soc_charge_knee
+                    else:
+                        m_charge, b_charge = None, None
+                else:
+                    m_charge, b_charge = None, None
+
                 for t in range(T):
                     p_el_afrr[t] = 0.0  # Reset for this interval
 
-                    # 1. Determine available capacity and our integer bid size
-                    remaining_capacity = Pmax_el - da_plan['p_el_da'][t]
+                    # 1. Apply power curve to determine actual max charging power at current SOC
+                    if enable_curve and m_charge is not None:
+                        # The power curve limits charging based on SOC
+                        if current_soc < soc_charge_knee:
+                            max_charge_at_soc = Pmax_el
+                        else:
+                            max_charge_at_soc = min(Pmax_el, m_charge * current_soc + b_charge)
+                        max_charge_at_soc = max(0, max_charge_at_soc)  # Ensure non-negative
+                    else:
+                        max_charge_at_soc = Pmax_el
+
+                    # 2. Determine available capacity considering both DA commitment and power curve
+                    already_charging_da = da_plan['p_el_da'][t]
+                    remaining_capacity = max_charge_at_soc - already_charging_da
+                    remaining_capacity = max(0, remaining_capacity)  # Ensure non-negative
+
                     bid_size_mw = np.floor(remaining_capacity)
 
-                    # 2. Decide if we can and want to bid
+                    # 3. Check if we can physically accommodate more charge (SOC limit check)
+                    max_additional_energy = (Smax - current_soc) / (η * Δt)  # Max power to reach Smax
+                    bid_size_mw = min(bid_size_mw, np.floor(max_additional_energy))
+
+                    # 4. Decide if we can and want to bid
                     can_bid = bid_size_mw >= 1.0
                     we_win_bid = False
-                    
+
                     if can_bid:
                         # Determine bid premium based on current SOC
                         premium = 0.0
@@ -989,33 +1026,33 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                                 break
                         if current_soc >= soc_levels[-1]:
                             premium = float(soc_premium_table[soc_levels[-1]])
-                        
+
                         effective_bid = float(afrr_energy_bid_base) + premium
                         clearing_price = safe_float_convert(daily_clearing_prices[t]) if daily_clearing_prices is not None else 0.0
-                        
+
                         if clearing_price >= effective_bid:
                             we_win_bid = True
-                    
-                    # 3. If we won, calculate the activated power based on our integer bid
+
+                    # 5. If we won, calculate the activated power based on our integer bid
                     if we_win_bid:
                         activation_frac = (safe_float_convert(daily_activation_profile[t]) / 100.0) if daily_activation_profile is not None else 1.0
                         called_power = bid_size_mw * activation_frac
-                        
+
                         if called_power > 0.01:
                             power_charged_afrr = called_power
                             p_el_afrr[t] = power_charged_afrr
-                            
+
                             # Calculate financial impact for this interval
                             net_cost_per_mwh = C_grid - clearing_price
                             net_cost_for_interval = net_cost_per_mwh * power_charged_afrr * Δt
                             net_cost += net_cost_for_interval
-                            
+
                             # Calculate savings vs. using gas for the same thermal energy
                             thermal_via_afrr = power_charged_afrr * Δt * η
                             gas_alternative_cost = thermal_via_afrr * (C_gas / boiler_efficiency)
                             savings_vs_gas += (gas_alternative_cost - net_cost_for_interval)
 
-                    # 4. Update SOC for the end of this interval, using the final p_el_afrr[t]
+                    # 6. Update SOC for the end of this interval
                     total_charging = da_plan['p_el_da'][t] + p_el_afrr[t]
                     current_soc = current_soc * η_self + η * total_charging * Δt - da_plan['p_th'][t] * Δt
                     # Enforce physical SOC limits
@@ -1127,8 +1164,13 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         sim_results = None
                         if optimization_mode == "DA + aFRR Market" and enable_afrr_energy:
                             sim_results = simulate_afrr_energy(
-                                da_plan, soc0, daily_clearing_prices, daily_afrr_activation_profile, η_self
+                                da_plan, soc0, daily_clearing_prices, daily_afrr_activation_profile, η_self,
+                                enable_curve=enable_power_curve, curve_params=curve_params,
+                                Pmax_el=Pmax_el, Smax=Smax, SOC_min=SOC_min, η=η, Δt=Δt,
+                                C_grid=C_grid, C_gas=C_gas, boiler_efficiency=boiler_efficiency,
+                                soc_premium_table=soc_premium_table, afrr_energy_bid_base=afrr_energy_bid_base
                             )
+
                         else:
                             # If aFRR energy is disabled, create a zeroed-out result
                             initial_soc_trajectory = [soc0] + [soc_vars[t].value() for t in range(T)]
@@ -1445,7 +1487,13 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                             if status == 1:
                                 da_plan = {'p_el_da': [v.value() for v in p_el_da_vars.values()], 'p_th': [v.value() for v in p_th_vars.values()], 'p_gas': [v.value() for v in p_gas_vars.values()]}
                                 if optimization_mode == "DA + aFRR Market" and enable_afrr_energy:
-                                    sim_results = simulate_afrr_energy(da_plan, local_soc0, daily_clearing_prices, daily_afrr_activation_profile, η_self)
+                                    sim_results = simulate_afrr_energy(
+                                        da_plan, local_soc0, daily_clearing_prices, daily_afrr_activation_profile, η_self,
+                                        enable_curve=enable_power_curve, curve_params=curve_params,
+                                        Pmax_el=Pmax_el, Smax=Smax, SOC_min=SOC_min, η=η, Δt=Δt,
+                                        C_grid=C_grid, C_gas=C_gas, boiler_efficiency=boiler_efficiency,
+                                        soc_premium_table=soc_premium_table, afrr_energy_bid_base=afrr_energy_bid_base
+                                    )
                                     final_soc, afrr_energy_net_cost = sim_results['final_soc_trajectory'][-1], sim_results['net_cost']
                                 else:
                                     final_soc, afrr_energy_net_cost = soc_vars[T-1].value(), 0.0
