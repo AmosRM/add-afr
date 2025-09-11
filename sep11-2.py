@@ -428,6 +428,14 @@ with st.sidebar.expander("⚖️ Economic & Bidding Parameters"):
         step=0.1,
         help="Maximum power to commit to Day-Ahead market. Remaining capacity (up to system max) will be reserved for aFRR energy market participation."
     )
+    da_max_soc_pct = st.number_input(
+        "Max DA Market SOC (%)",
+        value=100.0,
+        min_value=0.0,
+        max_value=100.0,
+        step=5.0,
+        help="Maximum State of Charge the Day-Ahead market can plan for. The remaining capacity is reserved for aFRR energy."
+    )
     # aFRR parameters - only show when aFRR is selected
     if optimization_mode == "DA + aFRR Market":
         # aFRR Capacity Market parameters
@@ -837,7 +845,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             def build_da_only_model(prices, demand_profile, soc0, η_self, boiler_eff, 
                                     peak_restrictions=None, is_holiday=False, 
                                     afrr_commitment_mask=None,
-                                    enable_curve=False, curve_params=None, da_capacity_limit=None,
+                                    enable_curve=False, curve_params=None, da_capacity_limit=None, da_soc_limit_mwh=None,
                                     optimization_objective="Minimize Cost", price_cap=150.0):
                 """
                 Builds the PuLP model for Day-Ahead optimization only.
@@ -856,7 +864,14 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 p_el_da = LpVariable.dicts("p_el_da", range(T), lowBound=0, upBound=da_cap)
                 p_th = LpVariable.dicts("p_th", range(T), lowBound=0, upBound=Pmax_th)
                 p_gas = LpVariable.dicts("p_gas", range(T), lowBound=0)
-                soc = LpVariable.dicts("soc", range(T), lowBound=SOC_min, upBound=Smax)
+                effective_smax_da = da_soc_limit_mwh if da_soc_limit_mwh is not None else Smax
+                soc = LpVariable.dicts("soc", range(T), lowBound=SOC_min, upBound=effective_smax_da)
+                
+                # --- START OF FIX ---
+                # If the actual starting SOC is above the DA limit, the model must plan as if it's starting at the limit
+                # This prevents the model from being initialized in an infeasible state.
+                effective_soc0 = min(soc0, effective_smax_da)
+                # --- END OF FIX ---
                 
                 # Hourly block constraints for DA market
                 for hour_idx, t in enumerate(range(0, T, 4)):
@@ -932,7 +947,9 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     
                     # Apply power curves if enabled
                     if enable_curve and curve_params is not None:
-                        prev_soc = soc[t-1] if t > 0 else soc0
+                        # --- START OF FIX ---
+                        prev_soc = soc[t-1] if t > 0 else effective_soc0 # Use the capped soc0 for curve calc on first step
+                        # --- END OF FIX ---
                         if m_charge is not None:
                             model += p_el_da[t] <= Pmax_el, f"ChargeCurve_Flat_{t}"
                             model += p_el_da[t] <= m_charge * prev_soc + b_charge, f"ChargeCurve_Sloped_{t}"
@@ -942,7 +959,9 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     
                     # SOC dynamics (only DA charging)
                     if t == 0:
-                        model += soc[t] == soc0 * η_self + η * p_el_da[t] * Δt - p_th[t] * Δt
+                        # --- START OF FIX ---
+                        model += soc[t] == effective_soc0 * η_self + η * p_el_da[t] * Δt - p_th[t] * Δt
+                        # --- END OF FIX ---
                     else:
                         model += soc[t] == soc[t-1] * η_self + η * p_el_da[t] * Δt - p_th[t] * Δt
                 
@@ -1087,6 +1106,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 progress_bar = st.progress(0); status_text = st.empty()
                 soc0 = float(SOC_min)
                 results, all_trades, all_baselines = [], [], []
+                da_soc_limit_mwh = Smax * (da_max_soc_pct / 100.0)
 
                 for idx, (_, row) in enumerate(df_processed.iterrows()):
                     progress_bar.progress((idx + 1) / len(df_processed))
@@ -1146,7 +1166,8 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     model, p_el_da_vars, p_th_vars, p_gas_vars, soc_vars = build_da_only_model(
                         prices, demand_profile, soc0, η_self, boiler_efficiency,
                         peak_restrictions_for_day, is_holiday, blocked_intervals_for_day,
-                        enable_curve=enable_power_curve, curve_params=curve_params, da_capacity_limit=da_max_capacity,
+                        enable_curve=enable_power_curve, curve_params=curve_params, da_capacity_limit=da_max_capacity, 
+                        da_soc_limit_mwh=da_soc_limit_mwh,
                         optimization_objective=optimization_objective,
                         price_cap=price_cap_for_max_thermal
                     )
@@ -1427,7 +1448,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
 
                     # This helper function remains the same as it is the "gold standard"
                     memo = {} 
-                    def run_simulation_for_price(price_cap):
+                    def run_simulation_for_price(price_cap, da_soc_limit_mwh):
                         if price_cap in memo:
                             return memo[price_cap]
 
@@ -1480,6 +1501,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                                 prices, demand_profile, local_soc0, η_self, boiler_efficiency,
                                 peak_restrictions_for_day, is_holiday, blocked_intervals_for_day,
                                 enable_curve=enable_power_curve, curve_params=curve_params, da_capacity_limit=da_max_capacity,
+                                da_soc_limit_mwh=da_soc_limit_mwh, # <<< ADD THIS MISSING PARAMETER
                                 optimization_objective="Maximize Thermal from Electricity", price_cap=price_cap
                             )
                             status = model.solve(PULP_CBC_CMD(msg=False))
@@ -1516,14 +1538,14 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                             high_price = breakeven_price_analytical + 15
                             best_breakeven_price = None
                             
-                            savings_at_high = run_simulation_for_price(high_price)
+                            savings_at_high = run_simulation_for_price(high_price, da_soc_limit_mwh)
                             if savings_at_high > 0:
                                 st.warning(f"The system is still profitable at €{high_price:0f}/MWh (Savings: €{savings_at_high:,.0f}). The true breakeven point is higher.")
                                 best_breakeven_price = high_price
                             else:
                                 for i in range(5): # 5 iterations on a smaller range is plenty
                                     mid_price = (low_price + high_price) / 2
-                                    savings = run_simulation_for_price(mid_price)
+                                    savings = run_simulation_for_price(mid_price, da_soc_limit_mwh)
                                     if savings >= 0:
                                         low_price = mid_price
                                         best_breakeven_price = mid_price
@@ -1531,7 +1553,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                                         high_price = mid_price
                                 
                             if best_breakeven_price is not None:
-                                final_savings = run_simulation_for_price(best_breakeven_price)
+                                final_savings = run_simulation_for_price(best_breakeven_price, da_soc_limit_mwh)
                                 st.metric(
                                     label="Simulated Breakeven DA Price",
                                     value=f"€{best_breakeven_price:.1f} / MWh",
@@ -1612,6 +1634,8 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         f"- Grid Charges: {C_grid} €/MWh\n"
                         f"- Gas Price: {C_gas} €/MWh\n"
                         f"- Terminal Value: {terminal_value} €/MWh\n\n"
+                        f"Market Capacity Allocation\n"
+                        f"- Max DA Market Capacity: {da_max_capacity} MW\n"
                     )
 
                     if enable_afrr_capacity or enable_afrr_energy:

@@ -419,7 +419,7 @@ with st.sidebar.expander("⚖️ Economic & Bidding Parameters"):
     C_gas = st.number_input("Gas Price (€/MWh)", value=65.0, min_value=10.0, max_value=200.0, step=1.0)
     terminal_value = st.number_input("Terminal Value (€/MWh)", value=65.0, min_value=10.0, max_value=200.0, step=1.0, help="Estimated value of energy remaining in storage at the end of the optimization period.")
     st.markdown("---")
-    st.markdown("**Market Capacity Allocation**")
+    st.markdown("**DA Market Capacity Allocation**")
     da_max_capacity = st.number_input(
         "Max DA Market Capacity (MW)", 
         value=2.0,  # Default to full capacity
@@ -427,6 +427,15 @@ with st.sidebar.expander("⚖️ Economic & Bidding Parameters"):
         max_value=Pmax_el, 
         step=0.1,
         help="Maximum power to commit to Day-Ahead market. Remaining capacity (up to system max) will be reserved for aFRR energy market participation."
+    )
+    # NEW: Add SOC limit for DA
+    da_soc_limit = st.number_input(
+        "Max DA SOC Level (MWh)",
+        value=Smax,  # Default to full capacity (no restriction)
+        min_value=SOC_min,
+        max_value=Smax,
+        step=0.5,
+        help="Maximum SOC that can be reached through DA market charging. Reserve remaining capacity for aFRR energy market."
     )
     # aFRR parameters - only show when aFRR is selected
     if optimization_mode == "DA + aFRR Market":
@@ -837,7 +846,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             def build_da_only_model(prices, demand_profile, soc0, η_self, boiler_eff, 
                                     peak_restrictions=None, is_holiday=False, 
                                     afrr_commitment_mask=None,
-                                    enable_curve=False, curve_params=None, da_capacity_limit=None,
+                                    enable_curve=False, curve_params=None, da_capacity_limit=None, da_soc_limit=None,
                                     optimization_objective="Minimize Cost", price_cap=150.0):
                 """
                 Builds the PuLP model for Day-Ahead optimization only.
@@ -850,6 +859,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 else:  # Maximize Thermal from Electricity
                     model = LpProblem("DA_Maximize_Electric_Thermal", LpMaximize)
                 da_cap = da_capacity_limit if da_capacity_limit is not None else Pmax_el
+                da_soc_max = da_soc_limit if da_soc_limit is not None else Smax
 
                 
                 # Decision variables
@@ -857,6 +867,10 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 p_th = LpVariable.dicts("p_th", range(T), lowBound=0, upBound=Pmax_th)
                 p_gas = LpVariable.dicts("p_gas", range(T), lowBound=0)
                 soc = LpVariable.dicts("soc", range(T), lowBound=SOC_min, upBound=Smax)
+                
+                # Binary switch for DA charging when SOC cap is active
+                z_charge = LpVariable.dicts("z_charge", range(T), lowBound=0, upBound=1, cat=LpBinary)
+                M = Smax - SOC_min  # safe big-M for SOC relaxation
                 
                 # Hourly block constraints for DA market
                 for hour_idx, t in enumerate(range(0, T, 4)):
@@ -945,6 +959,14 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         model += soc[t] == soc0 * η_self + η * p_el_da[t] * Δt - p_th[t] * Δt
                     else:
                         model += soc[t] == soc[t-1] * η_self + η * p_el_da[t] * Δt - p_th[t] * Δt
+                    
+                    # DA SOC limit - charge-only cap using binary switch
+                    if da_soc_limit is not None and da_soc_limit < Smax:
+                        # Link: if z_charge[t] == 0 → p_el_da[t] must be 0
+                        model += p_el_da[t] <= da_cap * z_charge[t], f"ChargeSwitch_{t}"
+                        
+                        # Cap binds only when charging (z_charge[t] == 1); otherwise relaxed by M
+                        model += soc[t] <= da_soc_limit + M * (1 - z_charge[t]), f"CapWhenCharging_{t}"
                 
                 return model, p_el_da, p_th, p_gas, soc
 
@@ -996,19 +1018,19 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     else:
                         max_charge_at_soc = Pmax_el
 
-                    # 2. Determine available capacity considering both DA commitment and power curve
+                    # 2. Calculate available electrical headroom (robust, no floor)
                     already_charging_da = da_plan['p_el_da'][t]
-                    remaining_capacity = max_charge_at_soc - already_charging_da
-                    remaining_capacity = max(0, remaining_capacity)  # Ensure non-negative
+                    elec_headroom_mw = max(0.0, max_charge_at_soc - already_charging_da)
 
-                    bid_size_mw = np.floor(remaining_capacity)
+                    # 3. Calculate SOC headroom (how much power fills the tank in one step)
+                    soc_headroom_mwh = max(0.0, Smax - current_soc)
+                    soc_limit_mw = soc_headroom_mwh / (η * Δt)
 
-                    # 3. Check if we can physically accommodate more charge (SOC limit check)
-                    max_additional_energy = (Smax - current_soc) / (η * Δt)  # Max power to reach Smax
-                    bid_size_mw = min(bid_size_mw, np.floor(max_additional_energy))
+                    # 4. The final allowable aFRR power is the minimum of all constraints
+                    p_afrr_allowed_mw = max(0.0, min(elec_headroom_mw, soc_limit_mw))
 
-                    # 4. Decide if we can and want to bid
-                    can_bid = bid_size_mw >= 1.0
+                    # 5. Decide if we can bid (use small tolerance instead of floor)
+                    can_bid = p_afrr_allowed_mw > 0.01
                     we_win_bid = False
 
                     if can_bid:
@@ -1033,10 +1055,10 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         if clearing_price >= effective_bid:
                             we_win_bid = True
 
-                    # 5. If we won, calculate the activated power based on our integer bid
+                    # 6. If we won, calculate the activated power based on our allowed capacity
                     if we_win_bid:
                         activation_frac = (safe_float_convert(daily_activation_profile[t]) / 100.0) if daily_activation_profile is not None else 1.0
-                        called_power = bid_size_mw * activation_frac
+                        called_power = p_afrr_allowed_mw * activation_frac
 
                         if called_power > 0.01:
                             power_charged_afrr = called_power
@@ -1147,6 +1169,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         prices, demand_profile, soc0, η_self, boiler_efficiency,
                         peak_restrictions_for_day, is_holiday, blocked_intervals_for_day,
                         enable_curve=enable_power_curve, curve_params=curve_params, da_capacity_limit=da_max_capacity,
+                        da_soc_limit=da_soc_limit,  # NEW
                         optimization_objective=optimization_objective,
                         price_cap=price_cap_for_max_thermal
                     )
@@ -1333,6 +1356,13 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             with col1: st.success(f"**Best day:** {best_day['day']} (€{best_day['savings']:.2f} saved)")
             with col2: st.warning(f"**Worst day:** {worst_day['day']} (€{worst_day['savings']:.2f} saved)")
 
+            # Display DA SOC limit information if active
+            if da_soc_limit < Smax:
+                reserved_capacity = Smax - da_soc_limit
+                st.info(f"🔋 **DA SOC Limit Active:** DA market can charge up to {da_soc_limit:.1f} MWh. "
+                       f"Reserved {reserved_capacity:.1f} MWh capacity for aFRR energy market participation. "
+                       f"Max DA capacity: {da_max_capacity:.1f} MW.")
+
             
             fig1 = px.line(results_df, x='date', y='savings', title='Daily Savings Over Time', labels={'savings': 'Savings (€)', 'date': 'Date'})
             fig1.add_hline(y=avg_savings, line_dash="dash", annotation_text=f"Average: €{avg_savings:.2f}")
@@ -1480,6 +1510,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                                 prices, demand_profile, local_soc0, η_self, boiler_efficiency,
                                 peak_restrictions_for_day, is_holiday, blocked_intervals_for_day,
                                 enable_curve=enable_power_curve, curve_params=curve_params, da_capacity_limit=da_max_capacity,
+                                da_soc_limit=da_soc_limit,  # NEW
                                 optimization_objective="Maximize Thermal from Electricity", price_cap=price_cap
                             )
                             status = model.solve(PULP_CBC_CMD(msg=False))
@@ -1570,6 +1601,15 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         fig4.add_trace(go.Scatter(x=analysis_trades['datetime'], y=analysis_trades['p_th_discharge'], name='Discharging', line=dict(color='red', dash='dot')), row=1, col=1, secondary_y=True)
                         fig4.add_trace(go.Scatter(x=analysis_trades['datetime'], y=analysis_trades['demand_th'], name='Thermal Demand', line=dict(color='purple', dash='longdash')), row=1, col=1, secondary_y=True)
                         fig4.add_trace(go.Scatter(x=analysis_trades['datetime'], y=analysis_trades['soc'], name='SOC', line=dict(color='orange')), row=2, col=1)
+                        
+                        # Add DA SOC limit line if active
+                        if da_soc_limit < Smax:
+                            fig4.add_hline(y=da_soc_limit, line_dash="dash", line_color="red", 
+                                         annotation_text=f"DA SOC Limit ({da_soc_limit:.1f} MWh)", 
+                                         annotation_position="top right", row=2, col=1)
+                            fig4.add_hline(y=Smax, line_dash="dot", line_color="green", 
+                                         annotation_text=f"Max Capacity ({Smax:.1f} MWh)", 
+                                         annotation_position="bottom right", row=2, col=1)
                         
                         # Only show aFRR blocks if capacity market is enabled
                         if enable_afrr_capacity:
