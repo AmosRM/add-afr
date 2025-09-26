@@ -1630,7 +1630,14 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     daily_afrr_up_cap_revenue = 0
                     afrr_up_blocked_intervals_for_day = [False] * T
                     if optimization_mode == 'DA + aFRR Market' and afrr_up_15min_mask is not None:
+                        day_dt = pd.to_datetime(day)
+                        day_dt = day_dt.tz_localize(None) if day_dt.tz is not None else day_dt
+                        day_start = day_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                        day_end = day_start + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
                         try:
+                            # Ensure the index is a proper DatetimeIndex for comparison
+                            if not isinstance(afrr_up_15min_mask.index, pd.DatetimeIndex):
+                                afrr_up_15min_mask.index = pd.to_datetime(afrr_up_15min_mask.index)
                             daily_up_mask = afrr_up_15min_mask[(afrr_up_15min_mask.index >= day_start) & (afrr_up_15min_mask.index <= day_end)]
                             if not daily_up_mask.empty:
                                 up_mask_values = daily_up_mask.values
@@ -2063,7 +2070,14 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                             daily_afrr_up_cap_revenue = 0
                             afrr_up_blocked_intervals_for_day = [False] * T
                             if optimization_mode == 'DA + aFRR Market' and afrr_up_15min_mask is not None:
+                                day_dt = pd.to_datetime(day)
+                                day_dt = day_dt.tz_localize(None) if day_dt.tz is not None else day_dt
+                                day_start = day_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                                day_end = day_start + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
                                 try:
+                                    # Ensure the index is a proper DatetimeIndex for comparison
+                                    if not isinstance(afrr_up_15min_mask.index, pd.DatetimeIndex):
+                                        afrr_up_15min_mask.index = pd.to_datetime(afrr_up_15min_mask.index)
                                     daily_up_mask = afrr_up_15min_mask[(afrr_up_15min_mask.index >= day_start) & (afrr_up_15min_mask.index <= day_end)]
                                     if not daily_up_mask.empty:
                                         up_mask_values = daily_up_mask.values
