@@ -417,7 +417,7 @@ with st.sidebar.expander("⚖️ Economic & Bidding Parameters"):
     C_grid = st.number_input("Grid Charges (€/MWh)", value=30.0, min_value=0.0, max_value=100.0, step=1.0)
 
     C_gas = st.number_input("Gas Price (€/MWh)", value=65.0, min_value=10.0, max_value=200.0, step=1.0)
-    terminal_value = st.number_input("Terminal Value (€/MWh)", value=65.0, min_value=10.0, max_value=200.0, step=1.0, help="Estimated value of energy remaining in storage at the end of the optimization period.")
+    terminal_value = C_gas
     st.markdown("---")
     st.markdown("**Market Capacity Allocation**")
     da_max_capacity = st.number_input(
@@ -469,8 +469,8 @@ with st.sidebar.expander("⚖️ Economic & Bidding Parameters"):
                 step=1.0,
                 help="Base bid price for aFRR energy. Premium will be applied based on SOC."
             )
-            st.markdown("**SOC-based Premium Schedule**")
-            st.caption("Premium increases with SOC to avoid winning when battery is full")
+            st.markdown("**SOC-based Premium Schedule (%)**")
+            st.caption("Premium increases with SOC (%) to avoid winning when storage is full.")
             
             # Create editable premium table
             col1, col2 = st.columns([6, 1])
@@ -478,14 +478,13 @@ with st.sidebar.expander("⚖️ Economic & Bidding Parameters"):
                 # Initialize default premium table if not in session state
                 if 'soc_premium_table' not in st.session_state:
                     st.session_state.soc_premium_table = {
-                        0.0: 0.0, 1.0: 0.0, 2.0: 0.0, 3.0: 10.0,
-                        4.0: 40.0, 7.5: 300.0, 8.0: 10000.0
+                        50: 0.0, 75: 40.0, 95: 300.0, 100: 10000.0
                     }
                 
                 # Create editable dataframe
                 premium_df = pd.DataFrame(
                     list(st.session_state.soc_premium_table.items()),
-                    columns=['SOC (MWh)', 'Premium (€/MWh)']
+                    columns=['SOC (%)', 'Premium (€/MWh)']
                 )
                 
                 # Use st.data_editor for editable table
@@ -501,7 +500,7 @@ with st.sidebar.expander("⚖️ Economic & Bidding Parameters"):
                 if not edited_premium_df.equals(premium_df):
                     new_premium_table = {}
                     for _, row in edited_premium_df.iterrows():
-                        soc = float(row['SOC (MWh)'])
+                        soc = float(row['SOC (%)'])
                         premium = float(row['Premium (€/MWh)'])
                         new_premium_table[soc] = premium
                     st.session_state.soc_premium_table = new_premium_table
@@ -512,8 +511,7 @@ with st.sidebar.expander("⚖️ Economic & Bidding Parameters"):
             with col2:
                 if st.button("Reset"):
                     st.session_state.soc_premium_table = {
-                        0.0: 0.0, 1.0: 0.0, 2.0: 0.0, 3.0: 10.0,
-                        4.0: 40.0, 7.5: 300.0, 8.0: 10000.0
+                        50: 0.0, 75: 40.0, 95: 300.0, 100: 10000.0
                     }
                     st.rerun()
                 
@@ -1031,19 +1029,21 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     we_win_bid = False
 
                     if can_bid:
-                        # Determine bid premium based on current SOC
+                        # Determine bid premium based on current SOC percentage
                         premium = 0.0
+                        current_soc_pct = (current_soc / Smax * 100) if Smax > 0 else 0
+                        
                         soc_levels = sorted([float(k) for k in soc_premium_table.keys()])
                         for i in range(len(soc_levels) - 1):
-                            if soc_levels[i] <= current_soc <= soc_levels[i+1]:
+                            if soc_levels[i] <= current_soc_pct <= soc_levels[i+1]:
                                 soc_range = soc_levels[i+1] - soc_levels[i]
                                 if soc_range > 0:
-                                    weight = (current_soc - soc_levels[i]) / soc_range
+                                    weight = (current_soc_pct - soc_levels[i]) / soc_range
                                     premium = (1 - weight) * float(soc_premium_table[soc_levels[i]]) + weight * float(soc_premium_table[soc_levels[i+1]])
                                 else:
                                     premium = float(soc_premium_table[soc_levels[i]])
                                 break
-                        if current_soc >= soc_levels[-1]:
+                        if current_soc_pct >= soc_levels[-1]:
                             premium = float(soc_premium_table[soc_levels[-1]])
 
                         effective_bid = float(afrr_energy_bid_base) + premium
@@ -1633,7 +1633,6 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                         f"Economic Parameters:\n"
                         f"- Grid Charges: {C_grid} €/MWh\n"
                         f"- Gas Price: {C_gas} €/MWh\n"
-                        f"- Terminal Value: {terminal_value} €/MWh\n\n"
                         f"Market Capacity Allocation\n"
                         f"- Max DA Market Capacity: {da_max_capacity} MW\n"
                     )
